@@ -1,19 +1,38 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/booth_models.dart';
+import '../services/canon_camera_service.dart';
 import '../state/photo_booth_config.dart';
+import '../theme/app_theme.dart';
+
+/// Satu hasil jepretan dalam sesi booth.
+class BoothShot {
+  const BoothShot({this.filePath, this.bytes});
+
+  final String? filePath;
+  final Uint8List? bytes;
+
+  bool get hasImage =>
+      bytes != null ||
+      (!kIsWeb && filePath != null && File(filePath!).existsSync());
+}
 
 class BoothPage extends StatefulWidget {
   const BoothPage({
     super.key,
     required this.config,
+    required this.canon,
   });
 
   final PhotoBoothConfig config;
+  final CanonCameraService canon;
 
   @override
   State<BoothPage> createState() => _BoothPageState();
@@ -28,6 +47,14 @@ class _BoothPageState extends State<BoothPage> {
   String? _activeCameraId;
   ResolutionPreset? _activePreset;
 
+  // --- state sesi capture ---
+  final List<BoothShot> _shots = <BoothShot>[];
+  int _countdown = 0;
+  bool _sessionRunning = false;
+  bool _flashOn = false;
+  int _retakeCount = 0;
+  String? _captureError;
+
   @override
   void initState() {
     super.initState();
@@ -36,17 +63,61 @@ class _BoothPageState extends State<BoothPage> {
         ? _BoothStage.landing
         : _BoothStage.frameSelection;
     widget.config.addListener(_handleConfigChanged);
-    _initializeCamera();
+    widget.canon.addListener(_handleCanonChanged);
+    _bootCamera();
+  }
+
+  bool get _useCanon => widget.config.useCanonCamera;
+
+  /// Menentukan sumber gambar: Canon EOS R100 atau kamera perangkat.
+  Future<void> _bootCamera() async {
+    if (_useCanon) {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+
+      bool ok = widget.canon.state.isConnected;
+      if (!ok) {
+        ok = await widget.canon.connect();
+      }
+      if (ok) {
+        await widget.canon.startLiveView(fps: widget.config.canonLiveViewFps);
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoading = false;
+        _error = ok ? null : widget.canon.statusMessage;
+      });
+      return;
+    }
+
+    await _initializeCamera();
+  }
+
+  void _handleCanonChanged() {
+    if (mounted && _useCanon) {
+      setState(() {});
+    }
   }
 
   @override
   void dispose() {
     widget.config.removeListener(_handleConfigChanged);
+    widget.canon.removeListener(_handleCanonChanged);
+    widget.canon.stopLiveView();
     _controller?.dispose();
     super.dispose();
   }
 
   void _handleConfigChanged() {
+    if (_useCanon) {
+      setState(() {});
+      return;
+    }
+
     if (_activeCameraId != widget.config.preferredCameraId ||
         _activePreset != widget.config.resolutionPreset) {
       _initializeCamera();
@@ -230,115 +301,532 @@ class _BoothPageState extends State<BoothPage> {
       return _buildFrameSelectionScreen(context);
     }
 
+    if (_stage == _BoothStage.result) {
+      return _buildResultScreen(context);
+    }
+
+    return _buildCaptureScreen(context);
+  }
+
+  // -------------------------------------------------------- alur pengambilan
+
+  /// Widget live view aktif: Canon EOS R100 atau kamera perangkat.
+  Widget _buildLiveSource(BuildContext context) {
+    if (_useCanon) {
+      final Uint8List? frame = widget.canon.liveViewFrame;
+      if (frame == null) {
+        return _StatusMessage(
+          icon: Icons.linked_camera_outlined,
+          title: widget.canon.state.isConnected
+              ? 'Menunggu live view Canon'
+              : 'Canon EOS R100 belum terhubung',
+          message: widget.canon.statusMessage,
+        );
+      }
+
+      Widget image = Image.memory(
+        frame,
+        gaplessPlayback: true,
+        fit: BoxFit.contain,
+        width: double.infinity,
+        height: double.infinity,
+      );
+
+      final List<double>? matrix = widget.config.filter.matrix;
+      if (matrix != null) {
+        image = ColorFiltered(
+          colorFilter: ColorFilter.matrix(matrix),
+          child: image,
+        );
+      }
+
+      return Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()
+          ..scale(widget.config.mirrorPreview ? -1.0 : 1.0, 1.0),
+        child: image,
+      );
+    }
+
     final CameraController? controller = _controller;
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return _StatusMessage(
+        icon: Icons.error_outline,
+        title: 'Camera unavailable',
+        message: _error!,
+      );
+    }
+    if (controller == null || !controller.value.isInitialized) {
+      return const _StatusMessage(
+        icon: Icons.videocam_off,
+        title: 'Camera not initialized',
+        message: 'Buka Settings untuk memilih kamera lain, lalu coba lagi.',
+      );
+    }
+
+    return _buildPreview(controller);
+  }
+
+  /// Menjalankan satu sesi lengkap: countdown + jepret sebanyak konfigurasi.
+  Future<void> _startSession() async {
+    if (_sessionRunning) {
+      return;
+    }
+
+    setState(() {
+      _sessionRunning = true;
+      _captureError = null;
+      _shots.clear();
+      _retakeCount = 0;
+    });
+
+    final int total = widget.config.photosPerSession;
+    for (int index = 0; index < total; index++) {
+      final int seconds = index == 0
+          ? widget.config.firstPhotoCountdownSeconds
+          : widget.config.countdownSeconds;
+
+      await _runCountdown(seconds);
+      if (!mounted || !_sessionRunning) {
+        return;
+      }
+
+      final BoothShot? shot = await _captureOne();
+      if (!mounted) {
+        return;
+      }
+      if (shot != null) {
+        setState(() => _shots.add(shot));
+      }
+
+      if (index < total - 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 900));
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _sessionRunning = false;
+      _stage = _BoothStage.result;
+    });
+  }
+
+  Future<void> _runCountdown(int seconds) async {
+    for (int value = seconds; value > 0; value--) {
+      if (!mounted || !_sessionRunning) {
+        return;
+      }
+      setState(() => _countdown = value);
+
+      if (value == 1 &&
+          _useCanon &&
+          widget.config.canonAutoFocusBeforeShot) {
+        unawaited(widget.canon.autoFocus());
+      }
+
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+
+    if (mounted) {
+      setState(() => _countdown = 0);
+    }
+  }
+
+  Future<void> _flash() async {
+    if (!widget.config.showFlashOverlay || !mounted) {
+      return;
+    }
+    setState(() => _flashOn = true);
+    await Future<void>.delayed(const Duration(milliseconds: 140));
+    if (mounted) {
+      setState(() => _flashOn = false);
+    }
+  }
+
+  /// Satu kali jepret dari sumber kamera yang aktif.
+  Future<BoothShot?> _captureOne() async {
+    if (widget.config.playShutterSound) {
+      unawaited(SystemSound.play(SystemSoundType.click));
+    }
+    unawaited(_flash());
+
+    if (_useCanon) {
+      final CanonCaptureResult result = await widget.canon.capture();
+      if (!result.success) {
+        if (mounted) {
+          setState(() => _captureError = result.message);
+        }
+        return null;
+      }
+      return BoothShot(filePath: result.filePath, bytes: result.bytes);
+    }
+
+    final CameraController? controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      setState(() => _captureError = 'Kamera belum siap untuk mengambil foto.');
+      return null;
+    }
+
+    try {
+      final XFile file = await controller.takePicture();
+      return BoothShot(filePath: file.path);
+    } on CameraException catch (error) {
+      if (mounted) {
+        setState(() => _captureError = error.description ?? error.code);
+      }
+      return null;
+    }
+  }
+
+  /// Retake satu foto tertentu dari halaman hasil.
+  Future<void> _retakeShot(int index) async {
+    if (!widget.config.enableRetakeButton) {
+      return;
+    }
+    if (!widget.config.unlimitedRetakes &&
+        _retakeCount >= widget.config.retakeLimitPerPhoto) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              'Batas retake tercapai (${widget.config.retakeLimitPerPhoto}x).'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _stage = _BoothStage.preview;
+      _sessionRunning = true;
+      _retakeCount += 1;
+    });
+
+    await _runCountdown(widget.config.countdownSeconds);
+    final BoothShot? shot = await _captureOne();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      if (shot != null && index < _shots.length) {
+        _shots[index] = shot;
+      } else if (shot != null) {
+        _shots.add(shot);
+      }
+      _sessionRunning = false;
+      _stage = _BoothStage.result;
+    });
+  }
+
+  void _resetSession() {
+    setState(() {
+      _shots.clear();
+      _countdown = 0;
+      _retakeCount = 0;
+      _captureError = null;
+      _sessionRunning = false;
+      _stage = widget.config.enableTapToStartOverlayScreen
+          ? _BoothStage.landing
+          : _BoothStage.frameSelection;
+    });
+  }
+
+  // ------------------------------------------------------------ layar capture
+  Widget _buildCaptureScreen(BuildContext context) {
+    final int total = widget.config.photosPerSession;
+    final int taken = _shots.length;
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Enter Booth'),
-        actions: <Widget>[
-          IconButton(
-            onPressed: _initializeCamera,
-            icon: const Icon(Icons.refresh),
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: <Widget>[
-            Expanded(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(28),
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                        color: widget.config.frame.borderColor, width: 8),
-                    gradient:
-                        LinearGradient(colors: widget.config.frame.gradient),
-                  ),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: <Widget>[
-                      if (_isLoading)
-                        const Center(child: CircularProgressIndicator())
-                      else if (_error != null)
-                        _StatusMessage(
-                          icon: Icons.error_outline,
-                          title: 'Camera unavailable',
-                          message: _error!,
-                        )
-                      else if (controller == null ||
-                          !controller.value.isInitialized)
-                        const _StatusMessage(
-                          icon: Icons.videocam_off,
-                          title: 'Camera not initialized',
-                          message:
-                              'Open Settings to choose another camera or retry.',
-                        )
-                      else
-                        _buildPreview(controller),
-                      if (widget.config.showGrid) const _GridOverlay(),
-                      Positioned(
-                        left: 18,
-                        right: 18,
-                        bottom: 18,
-                        child: Row(
-                          children: <Widget>[
-                            Expanded(
-                              child: _InfoPill(
-                                icon: Icons.filter_alt,
-                                text: widget.config.filter.label,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: _InfoPill(
-                                icon: Icons.border_outer,
-                                text: widget.config.frame.name,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: _InfoPill(
-                                icon: Icons.timer,
-                                text: '${widget.config.countdownSeconds}s',
-                              ),
-                            ),
-                          ],
+      body: AppBackground(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    IconButton.filledTonal(
+                      onPressed: _sessionRunning
+                          ? null
+                          : () => Navigator.of(context).maybePop(),
+                      icon: const Icon(Icons.arrow_back),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            widget.config.boothName,
+                            style:
+                                Theme.of(context).textTheme.titleLarge?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                          ),
+                          Text(
+                            _sessionRunning
+                                ? 'Sesi berjalan \u2014 foto ${taken + 1} dari $total'
+                                : 'Siap memulai sesi foto',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    StatusBadge(
+                      label: _useCanon
+                          ? (widget.canon.state.isConnected
+                              ? 'Canon EOS R100'
+                              : 'Canon offline')
+                          : 'Kamera perangkat',
+                      color: _useCanon
+                          ? (widget.canon.state.isConnected
+                              ? AppTheme.mint
+                              : AppTheme.danger)
+                          : AppTheme.sky,
+                      icon: Icons.camera,
+                    ),
+                    const SizedBox(width: 10),
+                    IconButton.filledTonal(
+                      onPressed: _sessionRunning ? null : _bootCamera,
+                      icon: const Icon(Icons.refresh),
+                      tooltip: 'Reload kamera',
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(AppTheme.radiusXl),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: widget.config.frame.borderColor,
+                          width: 6,
+                        ),
+                        borderRadius:
+                            BorderRadius.circular(AppTheme.radiusXl),
+                        gradient: LinearGradient(
+                          colors: widget.config.frame.gradient,
                         ),
                       ),
-                    ],
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: <Widget>[
+                          _buildLiveSource(context),
+                          if (widget.config.showGrid) const _GridOverlay(),
+                          if (_flashOn)
+                            const ColoredBox(color: Colors.white),
+                          if (_countdown > 0)
+                            _CountdownOverlay(value: _countdown),
+                          Positioned(
+                            left: 18,
+                            top: 18,
+                            child: _ShotProgress(total: total, taken: taken),
+                          ),
+                          Positioned(
+                            left: 18,
+                            right: 18,
+                            bottom: 18,
+                            child: Row(
+                              children: <Widget>[
+                                Expanded(
+                                  child: _InfoPill(
+                                    icon: Icons.filter_alt,
+                                    text: widget.config.filter.label,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: _InfoPill(
+                                    icon: Icons.border_outer,
+                                    text: widget.config.frame.name,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: _InfoPill(
+                                    icon: Icons.timer,
+                                    text: '${widget.config.countdownSeconds}s',
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () =>
-                        Navigator.of(context).pushNamed('/settings'),
-                    icon: const Icon(Icons.settings),
-                    label: const Text('Settings'),
+                if (_captureError != null) ...<Widget>[
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppTheme.danger.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+                      border: Border.all(
+                          color: AppTheme.danger.withValues(alpha: 0.4)),
+                    ),
+                    child: Row(
+                      children: <Widget>[
+                        const Icon(Icons.error_outline,
+                            color: AppTheme.danger, size: 18),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _captureError!,
+                            style: const TextStyle(color: AppTheme.danger),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                'Capture flow placeholder ready for integration.')),
-                      );
-                    },
-                    icon: const Icon(Icons.camera),
-                    label: const Text('Start Capture'),
-                  ),
+                ],
+                const SizedBox(height: 16),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _sessionRunning
+                            ? null
+                            : () => Navigator.of(context).pushNamed('/canon'),
+                        icon: const Icon(Icons.camera),
+                        label: const Text('Canon Setup'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _sessionRunning
+                            ? null
+                            : () => Navigator.of(context).pushNamed('/settings'),
+                        icon: const Icon(Icons.settings),
+                        label: const Text('Settings'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: GradientButton(
+                        expand: true,
+                        label: _sessionRunning
+                            ? 'Mengambil foto...'
+                            : 'Mulai Capture ($total foto)',
+                        icon: Icons.camera_alt_rounded,
+                        onPressed: _sessionRunning ? null : _startSession,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
-          ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------- layar hasil
+  Widget _buildResultScreen(BuildContext context) {
+    return Scaffold(
+      body: AppBackground(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                SectionHeader(
+                  title: 'Hasil Sesi',
+                  subtitle:
+                      '${_shots.length} foto siap dicetak dengan frame ${widget.config.frame.name}.',
+                  trailing: StatusBadge(
+                    label: 'Retake ${_retakeCount}x',
+                    color: AppTheme.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Expanded(
+                  child: _shots.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'Belum ada foto pada sesi ini.',
+                            style: TextStyle(color: AppTheme.textMuted),
+                          ),
+                        )
+                      : GridView.builder(
+                          gridDelegate:
+                              const SliverGridDelegateWithMaxCrossAxisExtent(
+                            maxCrossAxisExtent: 320,
+                            childAspectRatio: 3 / 4,
+                            crossAxisSpacing: 14,
+                            mainAxisSpacing: 14,
+                          ),
+                          itemCount: _shots.length,
+                          itemBuilder: (BuildContext context, int index) {
+                            return _ShotCard(
+                              shot: _shots[index],
+                              index: index,
+                              filterMatrix: widget.config.filter.matrix,
+                              frame: widget.config.frame,
+                              onRetake: widget.config.enableRetakeButton
+                                  ? () => _retakeShot(index)
+                                  : null,
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _resetSession,
+                        icon: const Icon(Icons.replay),
+                        label: const Text('Sesi Baru'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () =>
+                            Navigator.of(context).pushNamed('/filters'),
+                        icon: const Icon(Icons.auto_fix_high),
+                        label: const Text('Ganti Filter'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: GradientButton(
+                        expand: true,
+                        label: widget.config.disableAllPrinting
+                            ? 'Printing dinonaktifkan'
+                            : 'Cetak ke ${widget.config.primaryPrinter}',
+                        icon: Icons.print,
+                        onPressed: widget.config.disableAllPrinting ||
+                                _shots.isEmpty
+                            ? null
+                            : () {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                        '${_shots.length} foto dikirim ke ${widget.config.primaryPrinter}.'),
+                                  ),
+                                );
+                              },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -737,10 +1225,10 @@ class _BoothPageState extends State<BoothPage> {
     }
 
     return FittedBox(
-      fit: BoxFit.cover,
+      fit: BoxFit.contain,
       child: SizedBox(
-        width: controller.value.previewSize?.height ?? 1080,
-        height: controller.value.previewSize?.width ?? 1920,
+        width: 1000,
+        height: 1000 / controller.value.aspectRatio,
         child: Transform(
           alignment: Alignment.center,
           transform: Matrix4.identity()
@@ -774,6 +1262,202 @@ enum _BoothStage {
   landing,
   frameSelection,
   preview,
+  result,
+}
+
+/// Angka countdown besar di tengah live view.
+class _CountdownOverlay extends StatelessWidget {
+  const _CountdownOverlay({required this.value});
+
+  final int value;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: Colors.black.withValues(alpha: 0.35),
+      child: Center(
+        child: TweenAnimationBuilder<double>(
+          key: ValueKey<int>(value),
+          tween: Tween<double>(begin: 0.6, end: 1),
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutBack,
+          builder: (BuildContext context, double scale, Widget? child) {
+            return Transform.scale(scale: scale, child: child);
+          },
+          child: Container(
+            width: 168,
+            height: 168,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: AppTheme.accentGradient,
+              boxShadow: <BoxShadow>[
+                BoxShadow(
+                  color: AppTheme.accent.withValues(alpha: 0.45),
+                  blurRadius: 60,
+                  spreadRadius: 6,
+                ),
+              ],
+            ),
+            child: Text(
+              '$value',
+              style: const TextStyle(
+                fontSize: 86,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF17130A),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Indikator titik untuk menunjukkan progres jumlah foto.
+class _ShotProgress extends StatelessWidget {
+  const _ShotProgress({required this.total, required this.taken});
+
+  final int total;
+  final int taken;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Text(
+            '$taken/$total',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(width: 10),
+          ...List<Widget>.generate(
+            total,
+            (int index) => Padding(
+              padding: const EdgeInsets.only(right: 5),
+              child: Container(
+                width: 9,
+                height: 9,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: index < taken ? AppTheme.accent : Colors.white24,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Kartu hasil foto di halaman result, lengkap dengan tombol retake.
+class _ShotCard extends StatelessWidget {
+  const _ShotCard({
+    required this.shot,
+    required this.index,
+    required this.filterMatrix,
+    required this.frame,
+    this.onRetake,
+  });
+
+  final BoothShot shot;
+  final int index;
+  final List<double>? filterMatrix;
+  final BoothFrameOption frame;
+  final VoidCallback? onRetake;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget image;
+    if (shot.bytes != null) {
+      image = Image.memory(shot.bytes!, fit: BoxFit.cover);
+    } else if (!kIsWeb && shot.filePath != null) {
+      image = Image.file(
+        File(shot.filePath!),
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const ColoredBox(
+          color: Colors.black26,
+          child: Center(
+            child: Icon(Icons.broken_image_outlined,
+                color: AppTheme.textMuted, size: 32),
+          ),
+        ),
+      );
+    } else {
+      image = const ColoredBox(color: Colors.black26);
+    }
+
+    if (filterMatrix != null) {
+      image = ColorFiltered(
+        colorFilter: ColorFilter.matrix(filterMatrix!),
+        child: image,
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(color: frame.borderColor, width: 4),
+          borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            image,
+            Positioned(
+              left: 12,
+              top: 12,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  'Foto ${index + 1}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+            if (onRetake != null)
+              Positioned(
+                right: 10,
+                bottom: 10,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.black.withValues(alpha: 0.6),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                  ),
+                  onPressed: onRetake,
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('Retake'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ConfiguredBackground extends StatelessWidget {
@@ -787,7 +1471,7 @@ class _ConfiguredBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (imagePath == null || imagePath!.isEmpty) {
+    if (kIsWeb || imagePath == null || imagePath!.isEmpty) {
       return fallbackChild;
     }
 
@@ -808,7 +1492,7 @@ class _ConfiguredLogo extends StatelessWidget {
   final String? imagePath;
   final String boothName;
 
-  bool get _hasImage => imagePath != null && imagePath!.isNotEmpty;
+  bool get _hasImage => !kIsWeb && imagePath != null && imagePath!.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {

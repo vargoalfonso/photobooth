@@ -4,6 +4,16 @@ import 'package:flutter/material.dart';
 import '../models/booth_models.dart';
 
 class PhotoBoothConfig extends ChangeNotifier {
+  // ----------------------------------------------------- Canon EOS R100
+  /// Saat true, live view dan hasil foto diambil dari Canon EOS R100
+  /// (bukan webcam/kamera perangkat).
+  bool useCanonCamera = false;
+  bool canonAutoFocusBeforeShot = true;
+  int canonLiveViewFps = 15;
+  int photosPerSession = 4;
+  bool playShutterSound = true;
+  bool showFlashOverlay = true;
+
   BoothFilter filter = BoothFilter.none;
   BoothFrameOption frame = kFrameOptions.first;
   double cropScale = 1.0;
@@ -717,6 +727,37 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   void setCropRightPercent(double value) {
     cropRightPercent = value.clamp(0.0, 0.45);
+    notifyListeners();
+  }
+
+  // ----------------------------------------------------- Canon EOS R100
+  void setUseCanonCamera(bool value) {
+    useCanonCamera = value;
+    notifyListeners();
+  }
+
+  void setCanonAutoFocusBeforeShot(bool value) {
+    canonAutoFocusBeforeShot = value;
+    notifyListeners();
+  }
+
+  void setCanonLiveViewFps(int value) {
+    canonLiveViewFps = value.clamp(5, 30);
+    notifyListeners();
+  }
+
+  void setPhotosPerSession(int value) {
+    photosPerSession = value.clamp(1, 8);
+    notifyListeners();
+  }
+
+  void setPlayShutterSound(bool value) {
+    playShutterSound = value;
+    notifyListeners();
+  }
+
+  void setShowFlashOverlay(bool value) {
+    showFlashOverlay = value;
     notifyListeners();
   }
 }

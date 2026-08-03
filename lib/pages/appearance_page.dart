@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../state/photo_booth_config.dart';
+import '../utils/file_picker_helper.dart';
 
 class AppearancePage extends StatefulWidget {
   const AppearancePage({
@@ -398,12 +399,20 @@ class _AppearanceCustomBackgroundSettings extends StatelessWidget {
           Row(
             children: <Widget>[
               OutlinedButton(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                        content: Text(
-                            'File picker belum dihubungkan di build ini.')),
+                onPressed: () async {
+                  final String? path = await FilePickerHelper.pickCustomPath(
+                    allowedExtensions: const <String>['jpg', 'jpeg', 'png', 'webp', 'bmp'],
+                    dialogTitle: 'Pilih background image',
                   );
+                  if (path == null) {
+                    return;
+                  }
+                  config.setCustomBackgroundPath(path);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Background image berhasil dipilih.')),
+                    );
+                  }
                 },
                 child: const Text('Choose File'),
               ),
@@ -549,12 +558,20 @@ class _AppearanceCustomFontSettings extends StatelessWidget {
           Row(
             children: <Widget>[
               OutlinedButton(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                        content: Text(
-                            'File picker belum dihubungkan di build ini.')),
+                onPressed: () async {
+                  final String? path = await FilePickerHelper.pickCustomPath(
+                    allowedExtensions: const <String>['ttf', 'otf'],
+                    dialogTitle: 'Pilih file font',
                   );
+                  if (path == null) {
+                    return;
+                  }
+                  config.setCustomFontPath(path);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Font berhasil dipilih.')),
+                    );
+                  }
                 },
                 child: const Text('Choose File'),
               ),
@@ -691,13 +708,20 @@ class _AppearanceHomePageSettings extends StatelessWidget {
           Row(
             children: <Widget>[
               OutlinedButton(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content:
-                          Text('File picker belum dihubungkan di build ini.'),
-                    ),
+                onPressed: () async {
+                  final String? path = await FilePickerHelper.pickCustomPath(
+                    allowedExtensions: const <String>['jpg', 'jpeg', 'png', 'webp', 'mp4'],
+                    dialogTitle: 'Pilih media home page',
                   );
+                  if (path == null) {
+                    return;
+                  }
+                  config.setCustomHomePagePath(path);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Home page media berhasil dipilih.')),
+                    );
+                  }
                 },
                 child: const Text('Choose File'),
               ),
@@ -880,13 +904,20 @@ class _AppearanceTutorialSettings extends StatelessWidget {
           Row(
             children: <Widget>[
               OutlinedButton(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content:
-                          Text('File picker belum dihubungkan di build ini.'),
-                    ),
+                onPressed: () async {
+                  final String? path = await FilePickerHelper.pickCustomPath(
+                    allowedExtensions: const <String>['jpg', 'jpeg', 'png', 'webp', 'mp4'],
+                    dialogTitle: 'Pilih media tutorial',
                   );
+                  if (path == null) {
+                    return;
+                  }
+                  config.setCustomTutorialPath(path);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Tutorial media berhasil dipilih.')),
+                    );
+                  }
                 },
                 child: const Text('Choose File'),
               ),
@@ -1002,13 +1033,20 @@ class _AppearanceCustomLoadingMediaSettings extends StatelessWidget {
           Row(
             children: <Widget>[
               OutlinedButton(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content:
-                          Text('File picker belum dihubungkan di build ini.'),
-                    ),
+                onPressed: () async {
+                  final String? path = await FilePickerHelper.pickCustomPath(
+                    allowedExtensions: const <String>['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4'],
+                    dialogTitle: 'Pilih loading media',
                   );
+                  if (path == null) {
+                    return;
+                  }
+                  config.setCustomLoadingMediaPath(path);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Loading media berhasil dipilih.')),
+                    );
+                  }
                 },
                 child: const Text('Choose File'),
               ),
@@ -1253,7 +1291,7 @@ class _AppearancePlaceholder extends StatelessWidget {
       height: 420,
       child: Center(
         child: Text(
-          '$label belum diimplementasikan.',
+          'Panel $label sedang disiapkan untuk build berikutnya.',
           style: Theme.of(context).textTheme.titleMedium?.copyWith(
                 color: const Color(0xFF8A93A2),
               ),

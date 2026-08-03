@@ -21,6 +21,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   static const List<String> _tabs = <String>[
     'Camera',
+    'Canon EOS R100',
     'Printer',
     'Timer',
     'Payment',
@@ -610,6 +611,8 @@ class _SettingsPageState extends State<SettingsPage> {
                                   );
                                 },
                               )
+                            else if (_activeTab == 'Canon EOS R100')
+                              _CanonShortcutSection(config: widget.config)
                             else if (_activeTab == 'Printer')
                               _PrinterSettingsSection(config: widget.config)
                             else if (_activeTab == 'Timer')
@@ -630,15 +633,9 @@ class _SettingsPageState extends State<SettingsPage> {
                             else if (_activeTab == 'License')
                               _LicenseSettingsSection(config: widget.config)
                             else
-                              Card(
-                                child: Padding(
-                                  padding: const EdgeInsets.all(24),
-                                  child: Text(
-                                    'Section $_activeTab belum diimplementasikan.',
-                                    style:
-                                        Theme.of(context).textTheme.bodyLarge,
-                                  ),
-                                ),
+                              _GeneralSettingsSection(
+                                config: widget.config,
+                                onPickCustomLogo: _pickCustomLogo,
                               ),
                           ],
                         ),
@@ -792,7 +789,7 @@ class _SettingsLeftPanel extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: Colors.white70),
+                    ?.copyWith(color: Colors.black87),
               ),
               const SizedBox(height: 16),
               const _FieldLabel('Camera Aspect Ratio'),
@@ -832,7 +829,7 @@ class _SettingsLeftPanel extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: Colors.white70),
+                    ?.copyWith(color: Colors.black87),
               ),
               const SizedBox(height: 20),
               Text(
@@ -862,7 +859,7 @@ class _SettingsLeftPanel extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: Colors.white70),
+                    ?.copyWith(color: Colors.black87),
               ),
               const SizedBox(height: 16),
               SwitchListTile(
@@ -914,7 +911,7 @@ class _SettingsLeftPanel extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: Colors.white70),
+                    ?.copyWith(color: Colors.black87),
               ),
               const SizedBox(height: 16),
               SwitchListTile(
@@ -960,7 +957,7 @@ class _SettingsLeftPanel extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: Colors.white70),
+                    ?.copyWith(color: Colors.black87),
               ),
               const SizedBox(height: 16),
               const _FieldLabel('Screen Orientation'),
@@ -985,7 +982,7 @@ class _SettingsLeftPanel extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: Colors.white70),
+                    ?.copyWith(color: Colors.black87),
               ),
               const SizedBox(height: 12),
               SwitchListTile(
@@ -1213,7 +1210,7 @@ class _SettingsRightPanel extends StatelessWidget {
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
-                    ?.copyWith(color: Colors.white70),
+                    ?.copyWith(color: Colors.black87),
               ),
             ],
           ),
@@ -1294,11 +1291,15 @@ class _PreviewSurface extends StatelessWidget {
                   alignment: Alignment.center,
                   transform: Matrix4.identity()
                     ..scale(config.mirrorPreview ? -1.0 : 1.0, 1.0),
+                  // Tampilkan seluruh bidang pandang kamera (seperti preview
+                  // kamera di browser). Jangan membalik width/height preview
+                  // karena di desktop/web feed-nya sudah landscape; kalau
+                  // dibalik lalu di-cover, gambar jadi ter-crop sangat dekat.
                   child: FittedBox(
-                    fit: BoxFit.cover,
+                    fit: BoxFit.contain,
                     child: SizedBox(
-                      width: activeController.value.previewSize?.height ?? 1080,
-                      height: activeController.value.previewSize?.width ?? 1920,
+                      width: 1000,
+                      height: 1000 / activeController.value.aspectRatio,
                       child: preview,
                     ),
                   ),
@@ -1421,7 +1422,7 @@ class _PreviewMessage extends StatelessWidget {
           style: Theme.of(context)
               .textTheme
               .bodyLarge
-              ?.copyWith(color: Colors.white70),
+              ?.copyWith(color: Colors.black87),
         ),
       ),
     );
@@ -2435,7 +2436,7 @@ class _PrinterSettingsSection extends StatelessWidget {
                           style: Theme.of(context)
                               .textTheme
                               .bodySmall
-                              ?.copyWith(color: Colors.white70)),
+                              ?.copyWith(color: Colors.black87)),
                     ],
                   ),
                 ),
@@ -2468,7 +2469,7 @@ class _PrinterSettingsSection extends StatelessWidget {
                           style: Theme.of(context)
                               .textTheme
                               .bodySmall
-                              ?.copyWith(color: Colors.white70)),
+                              ?.copyWith(color: Colors.black87)),
                       const SizedBox(height: 20),
                       const _FieldLabel('Print Scale'),
                       Slider(
@@ -2497,7 +2498,7 @@ class _PrinterSettingsSection extends StatelessWidget {
                           style: Theme.of(context)
                               .textTheme
                               .bodySmall
-                              ?.copyWith(color: Colors.white70)),
+                              ?.copyWith(color: Colors.black87)),
                       const SizedBox(height: 16),
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
@@ -2575,7 +2576,7 @@ class _PrinterSettingsSection extends StatelessWidget {
                         style: Theme.of(context)
                             .textTheme
                             .bodySmall
-                            ?.copyWith(color: Colors.white70),
+                            ?.copyWith(color: Colors.black87),
                       ),
                     ],
                   ),
@@ -2614,7 +2615,7 @@ class _PrinterSettingsSection extends StatelessWidget {
                           style: Theme.of(context)
                               .textTheme
                               .bodySmall
-                              ?.copyWith(color: Colors.white70)),
+                              ?.copyWith(color: Colors.black87)),
                       const SizedBox(height: 16),
                       const _FieldLabel('Vertical Position'),
                       Row(
@@ -2644,7 +2645,7 @@ class _PrinterSettingsSection extends StatelessWidget {
                                   style: Theme.of(context)
                                       .textTheme
                                       .bodySmall
-                                      ?.copyWith(color: Colors.white70)),
+                                      ?.copyWith(color: Colors.black87)),
                             ],
                           ),
                         ],
@@ -2874,7 +2875,7 @@ class _PaymentSettingsSection extends StatelessWidget {
             style: Theme.of(context)
                 .textTheme
                 .bodySmall
-                ?.copyWith(color: Colors.white70),
+                ?.copyWith(color: Colors.black87),
           ),
           const SizedBox(height: 16),
           const _FieldLabel('Payment Method Visibility (Plus/Ultimate Only)'),
@@ -2898,7 +2899,7 @@ class _PaymentSettingsSection extends StatelessWidget {
             style: Theme.of(context)
                 .textTheme
                 .bodySmall
-                ?.copyWith(color: Colors.white70),
+                ?.copyWith(color: Colors.black87),
           ),
           const SizedBox(height: 16),
           const _FieldLabel('Midtrans Environment'),
@@ -3077,7 +3078,7 @@ class _MultiPrintDiscountSection extends StatelessWidget {
             style: Theme.of(context)
                 .textTheme
                 .bodySmall
-                ?.copyWith(color: Colors.white70),
+                ?.copyWith(color: Colors.black87),
           ),
         ],
       ),
@@ -3206,7 +3207,7 @@ class _ExtraPrintSection extends StatelessWidget {
             style: Theme.of(context)
                 .textTheme
                 .bodySmall
-                ?.copyWith(color: Colors.white70),
+                ?.copyWith(color: Colors.black87),
           ),
         ],
       ),
@@ -3285,6 +3286,88 @@ class _TextValueField extends StatelessWidget {
           decoration: InputDecoration(hintText: hintText),
         ),
       ],
+    );
+  }
+}
+
+class _CanonShortcutSection extends StatelessWidget {
+  const _CanonShortcutSection({required this.config});
+
+  final PhotoBoothConfig config;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'Canon EOS R100',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Gunakan lensa Canon sebagai sumber live view dan hasil foto booth.',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 18),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: config.useCanonCamera,
+              onChanged: config.setUseCanonCamera,
+              title: const Text('Pakai kamera Canon (bukan webcam)'),
+              subtitle: const Text(
+                  'Aktifkan setelah kamera terhubung lewat CCAPI atau USB bridge.'),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: config.canonAutoFocusBeforeShot,
+              onChanged: config.setCanonAutoFocusBeforeShot,
+              title: const Text('Auto focus sebelum jepret'),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: config.showFlashOverlay,
+              onChanged: config.setShowFlashOverlay,
+              title: const Text('Efek flash saat jepret'),
+            ),
+            const SizedBox(height: 8),
+            Text('Live view: ${config.canonLiveViewFps} fps',
+                style: Theme.of(context).textTheme.titleSmall),
+            Slider(
+              value: config.canonLiveViewFps.toDouble(),
+              min: 5,
+              max: 30,
+              divisions: 25,
+              label: '${config.canonLiveViewFps} fps',
+              onChanged: (double value) =>
+                  config.setCanonLiveViewFps(value.round()),
+            ),
+            const SizedBox(height: 12),
+            Text('Foto per sesi: ${config.photosPerSession}',
+                style: Theme.of(context).textTheme.titleSmall),
+            Slider(
+              value: config.photosPerSession.toDouble(),
+              min: 1,
+              max: 8,
+              divisions: 7,
+              label: '${config.photosPerSession}',
+              onChanged: (double value) =>
+                  config.setPhotosPerSession(value.round()),
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pushNamed('/canon'),
+              icon: const Icon(Icons.settings_input_antenna),
+              label: const Text('Buka Canon Setup lengkap'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
