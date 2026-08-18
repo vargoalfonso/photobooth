@@ -463,7 +463,16 @@ class _BoothPageState extends State<BoothPage> {
         }
         return null;
       }
-      return BoothShot(filePath: result.filePath, bytes: result.bytes);
+      // Di web, filePath tidak bisa dibaca via dart:io File, jadi butuh bytes.
+      Uint8List? bytes = result.bytes;
+      if (bytes == null && kIsWeb && result.filePath != null) {
+        try {
+          bytes = await XFile(result.filePath!).readAsBytes();
+        } catch (_) {
+          bytes = null;
+        }
+      }
+      return BoothShot(filePath: result.filePath, bytes: bytes);
     }
 
     final CameraController? controller = _controller;
@@ -474,7 +483,15 @@ class _BoothPageState extends State<BoothPage> {
 
     try {
       final XFile file = await controller.takePicture();
-      return BoothShot(filePath: file.path);
+      // Selalu baca bytes agar bisa ditampilkan di web (file.path = blob URL)
+      // dan tetap aman di desktop/mobile.
+      Uint8List? bytes;
+      try {
+        bytes = await file.readAsBytes();
+      } catch (_) {
+        bytes = null;
+      }
+      return BoothShot(filePath: file.path, bytes: bytes);
     } on CameraException catch (error) {
       if (mounted) {
         setState(() => _captureError = error.description ?? error.code);
