@@ -60,35 +60,35 @@ class _FiltersPageState extends State<FiltersPage> {
   }
 
   void _uploadFiles() {
-    if (_selectedFiles.isEmpty) {
-      _showMessage('Choose at least one .cube file first.');
-      return;
+    // compute file sizes asynchronously because PlatformFile.length() is async
+    Future<void> computeAndUpload() async {
+      final List<_InstalledFilterItem> newItems = <_InstalledFilterItem>[];
+      for (final PlatformFile file in _selectedFiles) {
+        final int bytes = await file.length();
+        newItems.add(_InstalledFilterItem(
+          id: file.name.toLowerCase().replaceAll(' ', '-'),
+          name: file.name,
+          sizeKb: bytes / 1024,
+          accentColor: _accentFromName(file.name),
+        ));
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        final Set<String> existingIds =
+            _installedFilters.map((_InstalledFilterItem item) => item.id).toSet();
+        _installedFilters = <_InstalledFilterItem>[
+          ..._installedFilters,
+          ...newItems.where((_InstalledFilterItem item) => !existingIds.contains(item.id)),
+        ];
+        _selectedFiles = const <PlatformFile>[];
+      });
+
+      _showMessage('${newItems.length} filter file(s) uploaded.');
     }
 
-    final List<_InstalledFilterItem> newItems = _selectedFiles
-        .map(
-          (PlatformFile file) => _InstalledFilterItem(
-            id: file.name.toLowerCase().replaceAll(' ', '-'),
-            name: file.name,
-            sizeKb: file.size / 1024,
-            accentColor: _accentFromName(file.name),
-          ),
-        )
-        .toList();
-
-    setState(() {
-      final Set<String> existingIds =
-          _installedFilters.map((_InstalledFilterItem item) => item.id).toSet();
-      _installedFilters = <_InstalledFilterItem>[
-        ..._installedFilters,
-        ...newItems.where(
-          (_InstalledFilterItem item) => !existingIds.contains(item.id),
-        ),
-      ];
-      _selectedFiles = const <PlatformFile>[];
-    });
-
-    _showMessage('${newItems.length} filter file(s) uploaded.');
+    computeAndUpload();
   }
 
   void _refreshInstalledFilters() {

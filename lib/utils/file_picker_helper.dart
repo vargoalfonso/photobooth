@@ -7,25 +7,21 @@ class FilePickerHelper {
     List<String>? allowedExtensions,
     String? dialogTitle,
   }) async {
-    final FilePickerResult? result = await FilePicker.platform.pickFiles(
+    final PlatformFile? file = await FilePicker.pickFile(
+      dialogTitle: dialogTitle,
       type: FileType.custom,
       allowedExtensions: allowedExtensions,
-      dialogTitle: dialogTitle,
-      allowMultiple: false,
       lockParentWindow: true,
     );
 
-    if (result == null || result.files.isEmpty) {
-      return null;
-    }
-
-    return result.files.single.path;
+    return file?.path;
   }
 
   static Future<List<PlatformFile>> pickMediaFiles({
     String? dialogTitle,
   }) async {
-    final FilePickerResult? result = await FilePicker.platform.pickFiles(
+    final List<PlatformFile> files = await FilePicker.pickFiles(
+      dialogTitle: dialogTitle,
       type: FileType.custom,
       allowedExtensions: const <String>[
         'jpg',
@@ -36,12 +32,10 @@ class FilePickerHelper {
         'webp',
       ],
       allowMultiple: true,
-      withData: true,
-      dialogTitle: dialogTitle,
       lockParentWindow: true,
     );
 
-    return result?.files ?? const <PlatformFile>[];
+    return files;
   }
 
   static Future<List<PlatformFile>> pickCustomFiles({
@@ -49,14 +43,14 @@ class FilePickerHelper {
     String? dialogTitle,
     bool allowMultiple = true,
   }) async {
-    final FilePickerResult? result = await FilePicker.platform.pickFiles(
+    final List<PlatformFile> files = await FilePicker.pickFiles(
+      dialogTitle: dialogTitle,
       type: FileType.custom,
       allowedExtensions: allowedExtensions,
       allowMultiple: allowMultiple,
-      dialogTitle: dialogTitle,
       lockParentWindow: true,
     );
 
-    return result?.files ?? const <PlatformFile>[];
+    return files;
   }
 }

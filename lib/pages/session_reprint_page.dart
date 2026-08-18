@@ -20,6 +20,7 @@ class SessionReprintPage extends StatefulWidget {
 
 class _SessionReprintPageState extends State<SessionReprintPage> {
   List<PlatformFile> _files = const <PlatformFile>[];
+  List<String> _fileSizeLabels = const <String>[];
   bool _isPicking = false;
 
   Future<void> _pickFiles() async {
@@ -31,11 +32,17 @@ class _SessionReprintPageState extends State<SessionReprintPage> {
       final List<PlatformFile> files = await FilePickerHelper.pickMediaFiles(
         dialogTitle: 'Choose session prints',
       );
+      final List<String> labels = <String>[];
+      for (final PlatformFile f in files) {
+        final int bytes = await f.length();
+        labels.add(_formatFileSize(bytes));
+      }
       if (!mounted) {
         return;
       }
       setState(() {
         _files = files;
+        _fileSizeLabels = labels;
       });
     } finally {
       if (mounted) {
@@ -262,9 +269,12 @@ class _SessionReprintPageState extends State<SessionReprintPage> {
                                   itemCount: _files.length,
                                   itemBuilder: (BuildContext context, int index) {
                                     final PlatformFile file = _files[index];
+                                    final String label = index < _fileSizeLabels.length
+                                        ? _fileSizeLabels[index]
+                                        : '';
                                     return _ReprintCard(
                                       file: file,
-                                      fileSizeLabel: _formatFileSize(file.size),
+                                      fileSizeLabel: label,
                                       onPreview: () => _openPreview(file),
                                       onPrint: () => _printFile(file),
                                     );
@@ -403,23 +413,26 @@ class _PreviewImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Uint8List? bytes = file.bytes;
-    if (bytes == null) {
-      return const Icon(
-        Icons.image_not_supported_outlined,
-        size: 48,
-        color: Color(0xFF98A1AE),
-      );
-    }
-
-    return Image.memory(
-      bytes,
-      fit: BoxFit.contain,
-      errorBuilder: (_, __, ___) {
-        return const Icon(
-          Icons.broken_image_outlined,
-          size: 48,
-          color: Color(0xFF98A1AE),
+    return FutureBuilder<Uint8List>(
+      future: file.readAsBytes(),
+      builder: (BuildContext context, AsyncSnapshot<Uint8List> snap) {
+        if (!snap.hasData) {
+          return const Icon(
+            Icons.image_not_supported_outlined,
+            size: 48,
+            color: Color(0xFF98A1AE),
+          );
+        }
+        return Image.memory(
+          snap.data!,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) {
+            return const Icon(
+              Icons.broken_image_outlined,
+              size: 48,
+              color: Color(0xFF98A1AE),
+            );
+          },
         );
       },
     );
