@@ -510,6 +510,7 @@ class BoothFrameOption {
     required this.description,
     required this.borderColor,
     required this.gradient,
+    this.slotCount = 4,
   });
 
   final String id;
@@ -517,6 +518,12 @@ class BoothFrameOption {
   final String description;
   final Color borderColor;
   final List<Color> gradient;
+
+  /// Jumlah slot foto pada frame ini. Saat ini hanya 3 atau 4.
+  final int slotCount;
+
+  /// Frame horizontal (strip mendatar). Selain ini dianggap vertikal.
+  bool get isHorizontal => id == 'minimal-slate';
 }
 
 const List<BoothFrameOption> kFrameOptions = <BoothFrameOption>[
@@ -526,6 +533,7 @@ const List<BoothFrameOption> kFrameOptions = <BoothFrameOption>[
     description: 'Border emas elegan seperti brand booth premium.',
     borderColor: Color(0xFFF1C24C),
     gradient: <Color>[Color(0x66F1C24C), Color(0x11FFFFFF)],
+    slotCount: 4,
   ),
   BoothFrameOption(
     id: 'neon-night',
@@ -533,6 +541,7 @@ const List<BoothFrameOption> kFrameOptions = <BoothFrameOption>[
     description: 'Aksen neon untuk event malam dan konser.',
     borderColor: Color(0xFF44E0FF),
     gradient: <Color>[Color(0x3344E0FF), Color(0x117D5CFF)],
+    slotCount: 4,
   ),
   BoothFrameOption(
     id: 'rose-party',
@@ -540,6 +549,7 @@ const List<BoothFrameOption> kFrameOptions = <BoothFrameOption>[
     description: 'Nuansa soft pink untuk wedding dan bridal booth.',
     borderColor: Color(0xFFFF8FB1),
     gradient: <Color>[Color(0x44FF8FB1), Color(0x11FFF3F7)],
+    slotCount: 3,
   ),
   BoothFrameOption(
     id: 'minimal-slate',
@@ -547,5 +557,6 @@ const List<BoothFrameOption> kFrameOptions = <BoothFrameOption>[
     description: 'Frame tipis modern untuk corporate activation.',
     borderColor: Color(0xFFB6C2D9),
     gradient: <Color>[Color(0x223D5877), Color(0x11000000)],
+    slotCount: 3,
   ),
 ];

@@ -55,6 +55,23 @@ class _BoothPageState extends State<BoothPage> {
   int _retakeCount = 0;
   String? _captureError;
 
+  // --- state compose (frame mockup + slot assignment) ---
+  /// Frame yang sedang aktif untuk compose/filter/print. Bisa diganti di
+  /// layar compose lewat chip.
+  late BoothFrameOption _activeFrame = widget.config.frame;
+
+  /// Filter yang sedang aktif untuk preview & cetak strip. Default mengikuti
+  /// pilihan filter awal user.
+  late BoothFilter _activeFilter = widget.config.filter;
+
+  /// Panjang list = _activeFrame.slotCount. Isi = index ke _shots atau null
+  /// bila slot kosong.
+  List<int?> _slotAssignments = <int?>[];
+
+  /// Slot yang sedang dipilih user (highlight) untuk menerima assignment
+  /// dari tray thumbnail. Null bila belum ada slot yang dipilih.
+  int? _selectedSlot;
+
   @override
   void initState() {
     super.initState();
@@ -301,6 +318,14 @@ class _BoothPageState extends State<BoothPage> {
       return _buildFrameSelectionScreen(context);
     }
 
+    if (_stage == _BoothStage.compose) {
+      return _buildComposeScreen(context);
+    }
+
+    if (_stage == _BoothStage.filterSelect) {
+      return _buildFilterSlideScreen(context);
+    }
+
     if (_stage == _BoothStage.result) {
       return _buildResultScreen(context);
     }
@@ -412,7 +437,10 @@ class _BoothPageState extends State<BoothPage> {
     }
     setState(() {
       _sessionRunning = false;
-      _stage = _BoothStage.result;
+      _activeFrame = widget.config.frame;
+      _activeFilter = widget.config.filter;
+      _initSlotsForFrame(_activeFrame);
+      _stage = _BoothStage.compose;
     });
   }
 
@@ -535,7 +563,100 @@ class _BoothPageState extends State<BoothPage> {
         _shots.add(shot);
       }
       _sessionRunning = false;
-      _stage = _BoothStage.result;
+      // Kembali ke layar compose supaya user langsung lihat hasil retake di
+      // dalam frame mockup.
+      _stage = _BoothStage.compose;
+    });
+  }
+
+  // ------------------------------------------------------------- helper compose
+
+  /// Menyiapkan (atau menyesuaikan) daftar slot untuk frame [frame]. Slot
+  /// diisi dengan foto pertama yang tersedia secara berurutan.
+  void _initSlotsForFrame(BoothFrameOption frame) {
+    final int slotCount = frame.slotCount;
+    final List<int?> next = List<int?>.filled(slotCount, null);
+    for (int i = 0; i < slotCount && i < _shots.length; i++) {
+      next[i] = i;
+    }
+    _slotAssignments = next;
+    _selectedSlot = null;
+  }
+
+  /// Pindah ke frame lain di layar compose. Berusaha mempertahankan urutan
+  /// assignment sebelumnya; kelebihan slot dipotong, kekurangan diisi dari
+  /// foto yang belum terpakai.
+  void _switchComposeFrame(BoothFrameOption frame) {
+    final List<int?> previous = List<int?>.from(_slotAssignments);
+    final List<int?> next = List<int?>.filled(frame.slotCount, null);
+
+    // Salin assignment lama sebanyak mungkin.
+    final int copy = frame.slotCount < previous.length
+        ? frame.slotCount
+        : previous.length;
+    for (int i = 0; i < copy; i++) {
+      next[i] = previous[i];
+    }
+
+    // Isi slot kosong dengan foto yang belum terpakai (urut).
+    final Set<int> used = <int>{
+      for (final int? v in next)
+        if (v != null) v,
+    };
+    int cursor = 0;
+    for (int i = 0; i < next.length; i++) {
+      if (next[i] != null) continue;
+      while (cursor < _shots.length && used.contains(cursor)) {
+        cursor++;
+      }
+      if (cursor < _shots.length) {
+        next[i] = cursor;
+        used.add(cursor);
+        cursor++;
+      }
+    }
+
+    setState(() {
+      _activeFrame = frame;
+      _slotAssignments = next;
+      _selectedSlot = null;
+    });
+  }
+
+  /// Tap sebuah slot untuk memilihnya (highlight); tap lagi untuk unselect.
+  void _handleSlotTap(int slotIndex) {
+    setState(() {
+      _selectedSlot = _selectedSlot == slotIndex ? null : slotIndex;
+    });
+  }
+
+  /// Tap sebuah thumbnail di tray untuk menempatkan foto ke slot yang aktif.
+  /// Bila foto tersebut sudah ada di slot lain, dilakukan swap.
+  void _assignShotToSelectedSlot(int shotIndex) {
+    final int? target = _selectedSlot;
+    if (target == null || target >= _slotAssignments.length) {
+      return;
+    }
+    setState(() {
+      final int existingSlot = _slotAssignments.indexOf(shotIndex);
+      final int? previousAtTarget = _slotAssignments[target];
+      _slotAssignments[target] = shotIndex;
+      if (existingSlot != -1 && existingSlot != target) {
+        _slotAssignments[existingSlot] = previousAtTarget;
+      }
+      _selectedSlot = null;
+    });
+  }
+
+  /// Menghapus foto dari slot yang aktif (bila ada).
+  void _clearSelectedSlot() {
+    final int? target = _selectedSlot;
+    if (target == null || target >= _slotAssignments.length) {
+      return;
+    }
+    setState(() {
+      _slotAssignments[target] = null;
+      _selectedSlot = null;
     });
   }
 
@@ -544,6 +665,10 @@ class _BoothPageState extends State<BoothPage> {
       _shots.clear();
       _countdown = 0;
       _retakeCount = 0;
+      _slotAssignments = <int?>[];
+      _selectedSlot = null;
+      _activeFrame = widget.config.frame;
+      _activeFilter = widget.config.filter;
       _captureError = null;
       _sessionRunning = false;
       _stage = widget.config.enableTapToStartOverlayScreen
@@ -736,6 +861,243 @@ class _BoothPageState extends State<BoothPage> {
                             : 'Mulai Capture ($total foto)',
                         icon: Icons.camera_alt_rounded,
                         onPressed: _sessionRunning ? null : _startSession,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // -------------------------------------------------- layar compose (mockup)
+  Widget _buildComposeScreen(BuildContext context) {
+    final int filled = _slotAssignments.where((int? v) => v != null).length;
+    final int total = _activeFrame.slotCount;
+    final bool allFilled = filled == total && total > 0;
+    final int? selected = _selectedSlot;
+    final bool selectionHasPhoto = selected != null &&
+        selected < _slotAssignments.length &&
+        _slotAssignments[selected] != null;
+
+    return Scaffold(
+      body: AppBackground(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                SectionHeader(
+                  title: 'Susun Frame',
+                  subtitle: selected == null
+                      ? 'Tap slot lalu pilih foto di bawah. $filled/$total slot terisi.'
+                      : 'Slot ${selected + 1} dipilih — tap foto di bawah untuk menempatkan.',
+                  trailing: StatusBadge(
+                    label: '$filled/$total slot',
+                    color: allFilled
+                        ? _activeFrame.borderColor
+                        : AppTheme.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  height: 44,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: kFrameOptions.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (BuildContext ctx, int i) {
+                      final BoothFrameOption f = kFrameOptions[i];
+                      return _FrameChip(
+                        frame: f,
+                        selected: f.id == _activeFrame.id,
+                        onTap: () => _switchComposeFrame(f),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Expanded(
+                  child: Center(
+                    child: _StripPreview(
+                      frame: _activeFrame,
+                      shots: _shots,
+                      assignments: _slotAssignments,
+                      selectedSlot: _selectedSlot,
+                      filterMatrix: null,
+                      onSlotTap: _handleSlotTap,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  height: 96,
+                  child: _shots.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'Belum ada foto pada sesi ini.',
+                            style: TextStyle(color: AppTheme.textMuted),
+                          ),
+                        )
+                      : ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _shots.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(width: 10),
+                          itemBuilder: (BuildContext ctx, int i) {
+                            final int slotIndex =
+                                _slotAssignments.indexOf(i);
+                            return _ShotThumb(
+                              shot: _shots[i],
+                              index: i,
+                              usedInSlot:
+                                  slotIndex == -1 ? null : slotIndex + 1,
+                              enabled: _selectedSlot != null,
+                              onTap: _selectedSlot == null
+                                  ? null
+                                  : () => _assignShotToSelectedSlot(i),
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _resetSession,
+                        icon: const Icon(Icons.replay),
+                        label: const Text('Sesi Baru'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: selectionHasPhoto ? _clearSelectedSlot : null,
+                        icon: const Icon(Icons.close),
+                        label: const Text('Kosongkan slot'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: selectionHasPhoto &&
+                                widget.config.enableRetakeButton
+                            ? () => _retakeShot(
+                                _slotAssignments[selected]!)
+                            : null,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Retake foto'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: GradientButton(
+                        expand: true,
+                        label: allFilled
+                            ? 'Lanjut ke Filter'
+                            : 'Isi semua slot dulu',
+                        icon: Icons.auto_fix_high,
+                        onPressed: allFilled
+                            ? () => setState(
+                                () => _stage = _BoothStage.filterSelect)
+                            : null,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // -------------------------------------------------- layar pemilihan filter
+  Widget _buildFilterSlideScreen(BuildContext context) {
+    return Scaffold(
+      body: AppBackground(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                SectionHeader(
+                  title: 'Pilih Filter',
+                  subtitle:
+                      'Geser filter di bawah untuk melihat efeknya pada seluruh strip.',
+                  trailing: StatusBadge(
+                    label: _activeFrame.name,
+                    color: _activeFrame.borderColor,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Expanded(
+                  child: Center(
+                    child: _StripPreview(
+                      frame: _activeFrame,
+                      shots: _shots,
+                      assignments: _slotAssignments,
+                      selectedSlot: null,
+                      filterMatrix: _activeFilter.matrix,
+                      onSlotTap: null,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 130,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: BoothFilter.values.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 12),
+                    itemBuilder: (BuildContext ctx, int i) {
+                      final BoothFilter f = BoothFilter.values[i];
+                      return _FilterCard(
+                        filter: f,
+                        selected: f == _activeFilter,
+                        onTap: () => setState(() => _activeFilter = f),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => setState(
+                            () => _stage = _BoothStage.compose),
+                        icon: const Icon(Icons.arrow_back),
+                        label: const Text('Kembali Compose'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: GradientButton(
+                        expand: true,
+                        label: widget.config.disableAllPrinting
+                            ? 'Printing dinonaktifkan'
+                            : 'Cetak ke ${widget.config.primaryPrinter}',
+                        icon: Icons.print,
+                        onPressed: widget.config.disableAllPrinting
+                            ? null
+                            : () {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                        'Strip ${_activeFrame.name} + filter ${_activeFilter.label} dikirim ke ${widget.config.primaryPrinter}.'),
+                                  ),
+                                );
+                              },
                       ),
                     ),
                   ],
@@ -1279,6 +1641,8 @@ enum _BoothStage {
   landing,
   frameSelection,
   preview,
+  compose,
+  filterSelect,
   result,
 }
 
@@ -1909,4 +2273,446 @@ class _GridPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+/// Preview strip yang menampilkan semua slot foto sesuai `frame.slotCount`.
+/// Digunakan di stage compose (dengan tap slot) dan stage filter (read-only
+/// dengan matrix filter ter-apply ke seluruh strip).
+class _StripPreview extends StatelessWidget {
+  const _StripPreview({
+    required this.frame,
+    required this.shots,
+    required this.assignments,
+    required this.selectedSlot,
+    required this.filterMatrix,
+    required this.onSlotTap,
+  });
+
+  final BoothFrameOption frame;
+  final List<BoothShot> shots;
+  final List<int?> assignments;
+  final int? selectedSlot;
+  final List<double>? filterMatrix;
+  final ValueChanged<int>? onSlotTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool horizontal = frame.isHorizontal;
+    final int n = frame.slotCount;
+
+    // Perkiraan ukuran strip agar proporsional.
+    final double maxW = horizontal ? 560 : 260;
+    final double maxH = horizontal ? 230 : (n == 4 ? 580 : 470);
+
+    final List<Widget> slotChildren = <Widget>[];
+    for (int i = 0; i < n; i++) {
+      slotChildren.add(Expanded(child: _buildSlot(context, i)));
+      if (i != n - 1) {
+        slotChildren.add(const SizedBox(width: 8, height: 8));
+      }
+    }
+
+    final Widget inner = horizontal
+        ? Row(children: slotChildren)
+        : Column(children: slotChildren);
+
+    return Container(
+      constraints: BoxConstraints(maxWidth: maxW, maxHeight: maxH),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: frame.borderColor, width: 6),
+        boxShadow: const <BoxShadow>[
+          BoxShadow(
+            color: Color(0x22000000),
+            blurRadius: 14,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        children: <Widget>[
+          Expanded(child: inner),
+          const SizedBox(height: 8),
+          Text(
+            'The Mystery Photo Booth',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: const Color(0xFF656565),
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.4,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSlot(BuildContext context, int slotIndex) {
+    final int? shotIndex =
+        slotIndex < assignments.length ? assignments[slotIndex] : null;
+    final BoothShot? shot = (shotIndex != null && shotIndex < shots.length)
+        ? shots[shotIndex]
+        : null;
+    final bool selected = selectedSlot == slotIndex;
+
+    Widget content;
+    if (shot == null) {
+      content = ColoredBox(
+        color: const Color(0xFFEDECE7),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(
+                Icons.add_photo_alternate_outlined,
+                color: Color(0xFF9C9689),
+                size: 26,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Slot ${slotIndex + 1}',
+                style: const TextStyle(
+                  color: Color(0xFF9C9689),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    } else {
+      Widget image;
+      if (shot.bytes != null) {
+        image = Image.memory(shot.bytes!, fit: BoxFit.cover);
+      } else if (!kIsWeb && shot.filePath != null) {
+        image = Image.file(
+          File(shot.filePath!),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const ColoredBox(
+            color: Colors.black26,
+            child: Center(
+              child: Icon(Icons.broken_image_outlined,
+                  color: AppTheme.textMuted, size: 24),
+            ),
+          ),
+        );
+      } else {
+        image = const ColoredBox(color: Colors.black26);
+      }
+      if (filterMatrix != null) {
+        image = ColorFiltered(
+          colorFilter: ColorFilter.matrix(filterMatrix!),
+          child: image,
+        );
+      }
+      content = image;
+    }
+
+    return GestureDetector(
+      onTap: onSlotTap == null ? null : () => onSlotTap!(slotIndex),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: selected ? frame.borderColor : const Color(0x22000000),
+            width: selected ? 3 : 1,
+          ),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              content,
+              Positioned(
+                left: 6,
+                top: 6,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '${slotIndex + 1}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+              if (selected)
+                Positioned(
+                  right: 6,
+                  top: 6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: frame.borderColor,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Text(
+                      'DIPILIH',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Chip untuk mengganti frame aktif di layar compose.
+class _FrameChip extends StatelessWidget {
+  const _FrameChip({
+    required this.frame,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final BoothFrameOption frame;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: selected ? frame.borderColor : const Color(0xFFD6CCBD),
+            width: selected ? 2.5 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Container(
+              width: 14,
+              height: 14,
+              decoration: BoxDecoration(
+                color: frame.borderColor,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              frame.name,
+              style: const TextStyle(
+                color: Color(0xFF2C2A26),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '${frame.slotCount} foto',
+              style: const TextStyle(
+                color: Color(0xFF7A7266),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Kartu thumbnail foto di tray bawah pada layar compose.
+class _ShotThumb extends StatelessWidget {
+  const _ShotThumb({
+    required this.shot,
+    required this.index,
+    required this.usedInSlot,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final BoothShot shot;
+  final int index;
+
+  /// Nomor slot (1-based) tempat foto ini terpasang, atau null bila belum.
+  final int? usedInSlot;
+
+  /// Apakah thumbnail bisa ditap (yaitu ada slot yang sedang terpilih).
+  final bool enabled;
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget image;
+    if (shot.bytes != null) {
+      image = Image.memory(shot.bytes!, fit: BoxFit.cover);
+    } else if (!kIsWeb && shot.filePath != null) {
+      image = Image.file(
+        File(shot.filePath!),
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const ColoredBox(color: Colors.black26),
+      );
+    } else {
+      image = const ColoredBox(color: Colors.black26);
+    }
+
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.65,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 96,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: usedInSlot != null
+                  ? const Color(0xFF2C2A26)
+                  : const Color(0x33000000),
+              width: usedInSlot != null ? 2 : 1,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                image,
+                Positioned(
+                  left: 4,
+                  top: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.6),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      'Foto ${index + 1}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+                if (usedInSlot != null)
+                  Positioned(
+                    right: 4,
+                    bottom: 4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.9),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        'Slot $usedInSlot',
+                        style: const TextStyle(
+                          color: Color(0xFF2C2A26),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Kartu di carousel filter (layar filterSelect).
+class _FilterCard extends StatelessWidget {
+  const _FilterCard({
+    required this.filter,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final BoothFilter filter;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        width: 140,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.94),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? filter.accentColor : const Color(0xFFD6CCBD),
+            width: selected ? 3 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: <Color>[
+                      filter.accentColor.withValues(alpha: 0.85),
+                      filter.accentColor.withValues(alpha: 0.35),
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              filter.label,
+              style: const TextStyle(
+                color: Color(0xFF2C2A26),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            Text(
+              filter.description,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Color(0xFF7A7266),
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
