@@ -105,6 +105,13 @@ class LauncherPage extends StatelessWidget {
         _Cozy.lilac,
       ),
       const _LauncherAction(
+        'API Monolith',
+        'Konfigurasi & sinkron ke server Laravel',
+        '/api-settings',
+        Icons.cloud_sync,
+        _Cozy.aqua,
+      ),
+      const _LauncherAction(
         'Custom Appearance',
         'Warna, logo, font, background',
         '/appearance',

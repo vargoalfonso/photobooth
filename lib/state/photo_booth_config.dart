@@ -4,6 +4,23 @@ import 'package:flutter/material.dart';
 import '../models/booth_models.dart';
 
 class PhotoBoothConfig extends ChangeNotifier {
+  // ------------------------------------------------------- Monolith API
+  /// Base URL API monolith Laravel (mis. `http://127.0.0.1:8000/api`).
+  /// Boleh diisi tanpa `/api` — client akan menambahkan otomatis.
+  String apiBaseUrl = 'http://127.0.0.1:8000/api';
+
+  /// Token opsional (Bearer) untuk API monolith. Kosongkan bila endpoint
+  /// tidak butuh autentikasi (sesuai `routes/api.php` yang public).
+  String apiAuthToken = '';
+
+  /// Booth ID (integer) yang mewakili device ini di monolith. Wajib untuk
+  /// membuat sesi lewat `POST /api/photo-sessions`.
+  int apiBoothId = 1;
+
+  /// Master switch untuk fitur upload/API. Kalau false, tombol upload ke
+  /// server dinonaktifkan dan `PhotoboothApiService.fromConfig` return null.
+  bool apiEnabled = false;
+
   // ----------------------------------------------------- Canon EOS R100
   /// Saat true, live view dan hasil foto diambil dari Canon EOS R100
   /// (bukan webcam/kamera perangkat).
@@ -727,6 +744,27 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   void setCropRightPercent(double value) {
     cropRightPercent = value.clamp(0.0, 0.45);
+    notifyListeners();
+  }
+
+  // ------------------------------------------------------- Monolith API
+  void setApiBaseUrl(String value) {
+    apiBaseUrl = value.trim();
+    notifyListeners();
+  }
+
+  void setApiAuthToken(String value) {
+    apiAuthToken = value.trim();
+    notifyListeners();
+  }
+
+  void setApiBoothId(int value) {
+    apiBoothId = value < 1 ? 1 : value;
+    notifyListeners();
+  }
+
+  void setApiEnabled(bool value) {
+    apiEnabled = value;
     notifyListeners();
   }
 

@@ -7,8 +7,11 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../models/api_models.dart';
 import '../models/booth_models.dart';
 import '../services/canon_camera_service.dart';
+import '../services/monolith_api_client.dart';
+import '../services/photobooth_api_service.dart';
 import '../state/photo_booth_config.dart';
 import '../theme/app_theme.dart';
 
@@ -671,10 +674,117 @@ class _BoothPageState extends State<BoothPage> {
       _activeFilter = widget.config.filter;
       _captureError = null;
       _sessionRunning = false;
+      _uploading = false;
+      _lastUploadedSessionId = null;
       _stage = widget.config.enableTapToStartOverlayScreen
           ? _BoothStage.landing
           : _BoothStage.frameSelection;
     });
+  }
+
+  // -------------------------------------------------------- upload monolith
+  bool _uploading = false;
+  int? _lastUploadedSessionId;
+
+  /// Kirim seluruh [_shots] ke API monolith sebagai sesi baru.
+  ///
+  /// Bila fitur API belum diaktifkan (lihat `PhotoBoothConfig.apiEnabled`)
+  /// tombol pemanggilnya tidak akan aktif, jadi method ini aman dipanggil.
+  Future<void> _uploadCurrentSessionToServer() async {
+    if (_uploading || _shots.isEmpty) return;
+
+    final PhotoboothApiService? svc =
+        PhotoboothApiService.fromConfig(widget.config);
+    if (svc == null) {
+      _showApiInactive();
+      return;
+    }
+
+    setState(() => _uploading = true);
+
+    try {
+      // 1) Cari template dari server yang cocok dengan jumlah slot foto.
+      final List<PhotoFrameDto> templates = await svc.listTemplates();
+      PhotoFrameDto? match;
+      final int photoCount = _shots.length;
+      for (final PhotoFrameDto t in templates) {
+        if (t.slotCount == photoCount) {
+          match = t;
+          break;
+        }
+      }
+      match ??= templates.isNotEmpty ? templates.first : null;
+
+      if (match == null) {
+        _showSnack(
+          'Tidak ada template aktif di server. Buat dulu di dashboard monolith.',
+        );
+        return;
+      }
+
+      // 2) Siapkan payload photos[].
+      final List<PhotoUpload> uploads = <PhotoUpload>[];
+      for (int i = 0; i < _shots.length; i++) {
+        final BoothShot shot = _shots[i];
+        final Uint8List? bytes = shot.bytes;
+        final String? path = shot.filePath;
+        final String filename =
+            'shot_${DateTime.now().millisecondsSinceEpoch}_$i.jpg';
+        if (bytes != null) {
+          uploads.add(PhotoUpload(filename: filename, bytes: bytes));
+        } else if (path != null && !kIsWeb) {
+          uploads.add(PhotoUpload(filename: filename, filePath: path));
+        }
+      }
+
+      if (uploads.isEmpty) {
+        _showSnack('Tidak ada foto yang bisa dibaca untuk diupload.');
+        return;
+      }
+
+      // 3) Panggil POST /api/photo-sessions.
+      final PhotoSessionDto session = await svc.createSession(
+        boothId: widget.config.apiBoothId,
+        photoFrameId: match.id,
+        photos: uploads,
+        filter: filterToApiString(_activeFilter),
+        layout: _activeFrame.id,
+        takenAt: DateTime.now(),
+      );
+
+      if (!mounted) return;
+      setState(() => _lastUploadedSessionId = session.id);
+      _showSnack(
+        'Sesi ${session.sessionCode} tersimpan ke server (id #${session.id}).',
+      );
+    } on ApiException catch (e) {
+      _showSnack('Upload gagal: ${e.message}');
+    } catch (e) {
+      _showSnack('Upload gagal: $e');
+    } finally {
+      svc.close();
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
+  void _showApiInactive() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text(
+            'Integrasi API belum aktif. Buka menu API Monolith untuk mengatur.'),
+        action: SnackBarAction(
+          label: 'Buka',
+          onPressed: () =>
+              Navigator.of(context).pushNamed('/api-settings'),
+        ),
+      ),
+    );
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ------------------------------------------------------------ layar capture
@@ -1161,6 +1271,35 @@ class _BoothPageState extends State<BoothPage> {
                         ),
                 ),
                 const SizedBox(height: 18),
+                if (widget.config.apiEnabled) ...<Widget>[
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.tonalIcon(
+                      onPressed: _uploading || _shots.isEmpty
+                          ? null
+                          : _uploadCurrentSessionToServer,
+                      icon: _uploading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Icon(
+                              _lastUploadedSessionId == null
+                                  ? Icons.cloud_upload
+                                  : Icons.cloud_done,
+                            ),
+                      label: Text(
+                        _uploading
+                            ? 'Mengunggah ke server...'
+                            : _lastUploadedSessionId == null
+                                ? 'Simpan ke Server (Monolith)'
+                                : 'Tersimpan #$_lastUploadedSessionId – upload ulang',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 Row(
                   children: <Widget>[
                     Expanded(

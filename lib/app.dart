@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'pages/api_settings_page.dart';
 import 'pages/appearance_page.dart';
 import 'pages/booth_page.dart';
 import 'pages/canon_setup_page.dart';
@@ -66,6 +67,8 @@ class _LuminashBoothAppState extends State<LuminashBoothApp> {
         page = UploadsPage(config: _config);
       case '/canon':
         page = CanonSetupPage(config: _config, canon: _canon);
+      case '/api-settings':
+        page = ApiSettingsPage(config: _config);
       case '/wizard':
         page = SetupWizardPage(config: _config, canon: _canon);
       case '/':
