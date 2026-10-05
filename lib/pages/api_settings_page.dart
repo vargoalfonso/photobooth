@@ -102,7 +102,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     if (service == null) {
       setState(() {
         _templatesError =
-            'Aktifkan integrasi API terlebih dahulu, lalu simpan Base URL.';
+            'Isi Base URL terlebih dahulu, lalu simpan.';
       });
       return;
     }
@@ -159,12 +159,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                     const SizedBox(height: 16),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
-                      title: const Text('Aktifkan integrasi API'),
+                      title: const Text('Wajib bayar sebelum mulai'),
                       subtitle: const Text(
-                          'Bila mati, tombol Upload/Simpan ke Server disembunyikan.'),
-                      value: widget.config.apiEnabled,
+                          'Pelanggan scan QR dari dashboard; booth baru jalan setelah status paid.'),
+                      value: widget.config.requirePayment,
                       onChanged: (bool value) {
-                        widget.config.setApiEnabled(value);
+                        widget.config.setRequirePayment(value);
                       },
                     ),
                     const SizedBox(height: 8),

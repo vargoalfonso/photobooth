@@ -9,11 +9,14 @@ import 'package:flutter/services.dart';
 
 import '../models/api_models.dart';
 import '../models/booth_models.dart';
+import '../models/payment_models.dart';
 import '../services/canon_camera_service.dart';
 import '../services/monolith_api_client.dart';
 import '../services/photobooth_api_service.dart';
 import '../state/photo_booth_config.dart';
 import '../theme/app_theme.dart';
+import '../widgets/capture_widgets.dart';
+import 'payment_gate_page.dart';
 
 /// Satu hasil jepretan dalam sesi booth.
 class BoothShot {
@@ -50,6 +53,47 @@ class _BoothPageState extends State<BoothPage> {
   String? _activeCameraId;
   ResolutionPreset? _activePreset;
 
+  // --- gerbang pembayaran ---
+  /// Sesi yang sudah lunas (hasil [PaymentGatePage]). Null = belum bayar.
+  PaidSession? _paid;
+
+  /// True setelah foto terkirim ke sesi berbayar, supaya retry saat PUT
+  /// metadata gagal tidak mengirim foto dobel (server membatasi jumlah take).
+  bool _paidPhotosSent = false;
+
+  /// Booth baru boleh dimulai setelah pembayaran terverifikasi di dashboard.
+  bool get _needsPayment => widget.config.requirePayment;
+
+  /// Stage awal. Kalau pembayaran wajib, selalu mulai dari landing supaya
+  /// gerbang QR muncul saat "Tap to Start!", walau overlay tap-to-start dimatikan.
+  _BoothStage get _initialStage =>
+      (widget.config.enableTapToStartOverlayScreen || _needsPayment)
+          ? _BoothStage.landing
+          : _BoothStage.frameSelection;
+
+  /// Jumlah foto sesi ini: ikut paket yang dibayar, bukan pengaturan lokal.
+  int get _photosTotal => _paid?.allowedTakes ?? widget.config.photosPerSession;
+
+  /// Tampilkan layar QR dan tunggu status paid. True bila boleh lanjut.
+  Future<bool> _ensurePaid() async {
+    if (!_needsPayment || _paid != null) {
+      return true;
+    }
+
+    final PaidSession? result = await Navigator.of(context).push<PaidSession>(
+      MaterialPageRoute<PaidSession>(
+        fullscreenDialog: true,
+        builder: (BuildContext _) => PaymentGatePage(config: widget.config),
+      ),
+    );
+
+    if (!mounted || result == null) {
+      return false;
+    }
+    setState(() => _paid = result);
+    return true;
+  }
+
   // --- state sesi capture ---
   final List<BoothShot> _shots = <BoothShot>[];
   int _countdown = 0;
@@ -79,9 +123,7 @@ class _BoothPageState extends State<BoothPage> {
   void initState() {
     super.initState();
     _pendingFrame = widget.config.frame;
-    _stage = widget.config.enableTapToStartOverlayScreen
-        ? _BoothStage.landing
-        : _BoothStage.frameSelection;
+    _stage = _initialStage;
     widget.config.addListener(_handleConfigChanged);
     widget.canon.addListener(_handleCanonChanged);
     _bootCamera();
@@ -355,7 +397,7 @@ class _BoothPageState extends State<BoothPage> {
       Widget image = Image.memory(
         frame,
         gaplessPlayback: true,
-        fit: BoxFit.contain,
+        fit: BoxFit.cover,
         width: double.infinity,
         height: double.infinity,
       );
@@ -404,6 +446,12 @@ class _BoothPageState extends State<BoothPage> {
       return;
     }
 
+    // Pengaman terakhir: tanpa pembayaran lunas, kembali ke layar awal.
+    if (_needsPayment && _paid == null) {
+      setState(() => _stage = _BoothStage.landing);
+      return;
+    }
+
     setState(() {
       _sessionRunning = true;
       _captureError = null;
@@ -411,7 +459,7 @@ class _BoothPageState extends State<BoothPage> {
       _retakeCount = 0;
     });
 
-    final int total = widget.config.photosPerSession;
+    final int total = _photosTotal;
     for (int index = 0; index < total; index++) {
       final int seconds = index == 0
           ? widget.config.firstPhotoCountdownSeconds
@@ -574,21 +622,22 @@ class _BoothPageState extends State<BoothPage> {
 
   // ------------------------------------------------------------- helper compose
 
-  /// Menyiapkan (atau menyesuaikan) daftar slot untuk frame [frame]. Slot
-  /// diisi dengan foto pertama yang tersedia secara berurutan.
+  /// Menyiapkan daftar slot untuk frame [frame]. Semua slot AWALNYA KOSONG:
+  /// customer sendiri yang menempatkan foto dari tray di bawah. Slot pertama
+  /// langsung terpilih supaya customer bisa langsung tap foto.
   void _initSlotsForFrame(BoothFrameOption frame) {
-    final int slotCount = frame.slotCount;
-    final List<int?> next = List<int?>.filled(slotCount, null);
-    for (int i = 0; i < slotCount && i < _shots.length; i++) {
-      next[i] = i;
-    }
-    _slotAssignments = next;
-    _selectedSlot = null;
+    _slotAssignments = List<int?>.filled(frame.slotCount, null);
+    _selectedSlot = frame.slotCount > 0 ? 0 : null;
+  }
+
+  /// Index slot kosong pertama, atau null bila semua sudah terisi.
+  int? _firstEmptySlot() {
+    final int index = _slotAssignments.indexWhere((int? v) => v == null);
+    return index == -1 ? null : index;
   }
 
   /// Pindah ke frame lain di layar compose. Berusaha mempertahankan urutan
-  /// assignment sebelumnya; kelebihan slot dipotong, kekurangan diisi dari
-  /// foto yang belum terpakai.
+  /// assignment sebelumnya; kelebihan slot dipotong, slot tambahan kosong.
   void _switchComposeFrame(BoothFrameOption frame) {
     final List<int?> previous = List<int?>.from(_slotAssignments);
     final List<int?> next = List<int?>.filled(frame.slotCount, null);
@@ -601,28 +650,11 @@ class _BoothPageState extends State<BoothPage> {
       next[i] = previous[i];
     }
 
-    // Isi slot kosong dengan foto yang belum terpakai (urut).
-    final Set<int> used = <int>{
-      for (final int? v in next)
-        if (v != null) v,
-    };
-    int cursor = 0;
-    for (int i = 0; i < next.length; i++) {
-      if (next[i] != null) continue;
-      while (cursor < _shots.length && used.contains(cursor)) {
-        cursor++;
-      }
-      if (cursor < _shots.length) {
-        next[i] = cursor;
-        used.add(cursor);
-        cursor++;
-      }
-    }
-
+    // Slot tambahan dibiarkan kosong; customer mengisinya dari tray.
     setState(() {
       _activeFrame = frame;
       _slotAssignments = next;
-      _selectedSlot = null;
+      _selectedSlot = _firstEmptySlot();
     });
   }
 
@@ -647,7 +679,9 @@ class _BoothPageState extends State<BoothPage> {
       if (existingSlot != -1 && existingSlot != target) {
         _slotAssignments[existingSlot] = previousAtTarget;
       }
-      _selectedSlot = null;
+      // Mengisi slot kosong -> otomatis pilih slot kosong berikutnya.
+      // Mengganti/menukar foto yang sudah ada -> selesai, tidak lompat.
+      _selectedSlot = previousAtTarget == null ? _firstEmptySlot() : null;
     });
   }
 
@@ -676,9 +710,10 @@ class _BoothPageState extends State<BoothPage> {
       _sessionRunning = false;
       _uploading = false;
       _lastUploadedSessionId = null;
-      _stage = widget.config.enableTapToStartOverlayScreen
-          ? _BoothStage.landing
-          : _BoothStage.frameSelection;
+      // Sesi berikutnya wajib bayar lagi.
+      _paid = null;
+      _paidPhotosSent = false;
+      _stage = _initialStage;
     });
   }
 
@@ -742,15 +777,35 @@ class _BoothPageState extends State<BoothPage> {
         return;
       }
 
-      // 3) Panggil POST /api/photo-sessions.
-      final PhotoSessionDto session = await svc.createSession(
-        boothId: widget.config.apiBoothId,
-        photoFrameId: match.id,
-        photos: uploads,
-        filter: filterToApiString(_activeFilter),
-        layout: _activeFrame.id,
-        takenAt: DateTime.now(),
-      );
+      // 3) Simpan ke server.
+      //    - Sudah bayar: foto masuk ke sesi yang dibuat saat pembayaran
+      //      (POST /photo-sessions/{id}/photos + PUT metadata). Server menolak
+      //      sesi yang belum paid dan membatasi jumlah foto sesuai paket.
+      //    - Tanpa pembayaran (mode lama): POST /api/photo-sessions.
+      final PaidSession? paid = _paid;
+      final PhotoSessionDto session;
+      if (paid != null) {
+        if (!_paidPhotosSent) {
+          await svc.addPhotos(sessionId: paid.sessionId, photos: uploads);
+          _paidPhotosSent = true;
+        }
+        session = await svc.updateSession(
+          sessionId: paid.sessionId,
+          photoFrameId: match.id,
+          filter: filterToApiString(_activeFilter),
+          layout: _activeFrame.id,
+          takenAt: DateTime.now(),
+        );
+      } else {
+        session = await svc.createSession(
+          boothId: widget.config.apiBoothId,
+          photoFrameId: match.id,
+          photos: uploads,
+          filter: filterToApiString(_activeFilter),
+          layout: _activeFrame.id,
+          takenAt: DateTime.now(),
+        );
+      }
 
       if (!mounted) return;
       setState(() => _lastUploadedSessionId = session.id);
@@ -771,7 +826,7 @@ class _BoothPageState extends State<BoothPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: const Text(
-            'Integrasi API belum aktif. Buka menu API Monolith untuk mengatur.'),
+            'Base URL API masih kosong. Buka menu API Monolith untuk mengisi.'),
         action: SnackBarAction(
           label: 'Buka',
           onPressed: () =>
@@ -788,193 +843,302 @@ class _BoothPageState extends State<BoothPage> {
   }
 
   // ------------------------------------------------------------ layar capture
+  /// Teks arahan untuk customer selama sesi berjalan.
+  String get _capturePrompt {
+    final int total = _photosTotal;
+    if (_countdown > 0) {
+      return _shots.length >= total - 1
+          ? 'Foto terakhir, senyum!'
+          : 'Siap-siap, lihat kamera';
+    }
+    return _shots.isEmpty ? 'Bersiap...' : 'Bagus! Ganti pose';
+  }
+
+  /// Gambar thumbnail dari satu hasil foto.
+  Widget _shotImage(BoothShot shot) {
+    if (shot.bytes != null) {
+      return Image.memory(shot.bytes!, fit: BoxFit.cover, gaplessPlayback: true);
+    }
+    if (!kIsWeb && shot.filePath != null) {
+      return Image.file(
+        File(shot.filePath!),
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const ColoredBox(color: Colors.black26),
+      );
+    }
+    return const ColoredBox(color: Colors.black26);
+  }
+
+  Widget _buildCaptureHeader(
+    BuildContext context, {
+    required int taken,
+    required int total,
+  }) {
+    return Row(
+      children: <Widget>[
+        IconButton.filledTonal(
+          onPressed: () => Navigator.of(context).maybePop(),
+          icon: const Icon(Icons.arrow_back),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                widget.config.boothName,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+              ),
+              Text(
+                'Siap memulai sesi foto',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+        StatusBadge(
+          label: _useCanon
+              ? (widget.canon.state.isConnected
+                  ? 'Canon EOS R100'
+                  : 'Canon offline')
+              : 'Kamera perangkat',
+          color: _useCanon
+              ? (widget.canon.state.isConnected
+                  ? AppTheme.mint
+                  : AppTheme.danger)
+              : AppTheme.sky,
+          icon: Icons.camera,
+        ),
+        const SizedBox(width: 10),
+        IconButton.filledTonal(
+          onPressed: _bootCamera,
+          icon: const Icon(Icons.refresh),
+          tooltip: 'Reload kamera',
+        ),
+      ],
+    );
+  }
+
   Widget _buildCaptureScreen(BuildContext context) {
-    final int total = widget.config.photosPerSession;
+    final int total = _photosTotal;
     final int taken = _shots.length;
+    final bool running = _sessionRunning;
+    final BoothFrameOption frame = widget.config.frame;
 
     return Scaffold(
       body: AppBackground(
         child: SafeArea(
           child: Padding(
-            padding: const EdgeInsets.all(20),
+            padding: EdgeInsets.all(running ? 14 : 20),
             child: Column(
               children: <Widget>[
-                Row(
-                  children: <Widget>[
-                    IconButton.filledTonal(
-                      onPressed: _sessionRunning
-                          ? null
-                          : () => Navigator.of(context).maybePop(),
-                      icon: const Icon(Icons.arrow_back),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(
-                            widget.config.boothName,
-                            style:
-                                Theme.of(context).textTheme.titleLarge?.copyWith(
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                          ),
-                          Text(
-                            _sessionRunning
-                                ? 'Sesi berjalan \u2014 foto ${taken + 1} dari $total'
-                                : 'Siap memulai sesi foto',
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ),
-                    StatusBadge(
-                      label: _useCanon
-                          ? (widget.canon.state.isConnected
-                              ? 'Canon EOS R100'
-                              : 'Canon offline')
-                          : 'Kamera perangkat',
-                      color: _useCanon
-                          ? (widget.canon.state.isConnected
-                              ? AppTheme.mint
-                              : AppTheme.danger)
-                          : AppTheme.sky,
-                      icon: Icons.camera,
-                    ),
-                    const SizedBox(width: 10),
-                    IconButton.filledTonal(
-                      onPressed: _sessionRunning ? null : _bootCamera,
-                      icon: const Icon(Icons.refresh),
-                      tooltip: 'Reload kamera',
-                    ),
-                  ],
+                // Header admin disembunyikan saat sesi berjalan supaya
+                // customer hanya melihat kamera + progres.
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 260),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.topCenter,
+                  child: running
+                      ? const SizedBox(width: double.infinity)
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            _buildCaptureHeader(
+                              context,
+                              taken: taken,
+                              total: total,
+                            ),
+                            const SizedBox(height: 16),
+                          ],
+                        ),
                 ),
-                const SizedBox(height: 16),
                 Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(AppTheme.radiusXl),
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                          color: widget.config.frame.borderColor,
-                          width: 6,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(AppTheme.radiusXl),
+                      boxShadow: <BoxShadow>[
+                        BoxShadow(
+                          color: frame.borderColor.withValues(alpha: 0.35),
+                          blurRadius: 40,
+                          spreadRadius: 2,
                         ),
-                        borderRadius:
-                            BorderRadius.circular(AppTheme.radiusXl),
-                        gradient: LinearGradient(
-                          colors: widget.config.frame.gradient,
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(AppTheme.radiusXl),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: frame.borderColor,
+                            width: 6,
+                          ),
+                          borderRadius:
+                              BorderRadius.circular(AppTheme.radiusXl),
+                          gradient: LinearGradient(colors: frame.gradient),
+                        ),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: <Widget>[
+                            _buildLiveSource(context),
+                            if (widget.config.showGrid && !running)
+                              const _GridOverlay(),
+                            ViewfinderCorners(
+                              color: _countdown > 0
+                                  ? AppTheme.accent
+                                  : Colors.white70,
+                            ),
+                            Positioned(
+                              left: 18,
+                              top: 18,
+                              child: CaptureProgressPill(
+                                total: total,
+                                taken: taken,
+                                running: running,
+                              ),
+                            ),
+                            if (running)
+                              Positioned(
+                                right: 22,
+                                top: 24,
+                                child: Text(
+                                  widget.config.boothName,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 2,
+                                    shadows: <Shadow>[
+                                      Shadow(
+                                          color: Colors.black87,
+                                          blurRadius: 10),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            if (running && _countdown == 0)
+                              Positioned(
+                                left: 18,
+                                right: 18,
+                                bottom: 26,
+                                child: Center(
+                                  child: CapturePromptBanner(
+                                    text: _capturePrompt,
+                                  ),
+                                ),
+                              ),
+                            if (!running)
+                              Positioned(
+                                left: 18,
+                                right: 18,
+                                bottom: 18,
+                                child: Row(
+                                  children: <Widget>[
+                                    Expanded(
+                                      child: _InfoPill(
+                                        icon: Icons.filter_alt,
+                                        text: widget.config.filter.label,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: _InfoPill(
+                                        icon: Icons.border_outer,
+                                        text: frame.name,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: _InfoPill(
+                                        icon: Icons.timer,
+                                        text:
+                                            '${widget.config.countdownSeconds}s',
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            if (_countdown > 0)
+                              CaptureCountdown(
+                                value: _countdown,
+                                prompt: _capturePrompt,
+                              ),
+                            CaptureFlash(on: _flashOn),
+                          ],
                         ),
                       ),
-                      child: Stack(
-                        fit: StackFit.expand,
+                    ),
+                  ),
+                ),
+                if (running) ...<Widget>[
+                  const SizedBox(height: 14),
+                  CaptureShotTray(
+                    total: total,
+                    taken: taken,
+                    thumbBuilder: (int index) => _shotImage(_shots[index]),
+                  ),
+                  const SizedBox(height: 2),
+                ] else ...<Widget>[
+                  if (_captureError != null) ...<Widget>[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppTheme.danger.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+                        border: Border.all(
+                            color: AppTheme.danger.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(
                         children: <Widget>[
-                          _buildLiveSource(context),
-                          if (widget.config.showGrid) const _GridOverlay(),
-                          if (_flashOn)
-                            const ColoredBox(color: Colors.white),
-                          if (_countdown > 0)
-                            _CountdownOverlay(value: _countdown),
-                          Positioned(
-                            left: 18,
-                            top: 18,
-                            child: _ShotProgress(total: total, taken: taken),
-                          ),
-                          Positioned(
-                            left: 18,
-                            right: 18,
-                            bottom: 18,
-                            child: Row(
-                              children: <Widget>[
-                                Expanded(
-                                  child: _InfoPill(
-                                    icon: Icons.filter_alt,
-                                    text: widget.config.filter.label,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: _InfoPill(
-                                    icon: Icons.border_outer,
-                                    text: widget.config.frame.name,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: _InfoPill(
-                                    icon: Icons.timer,
-                                    text: '${widget.config.countdownSeconds}s',
-                                  ),
-                                ),
-                              ],
+                          const Icon(Icons.error_outline,
+                              color: AppTheme.danger, size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _captureError!,
+                              style: const TextStyle(color: AppTheme.danger),
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ),
-                ),
-                if (_captureError != null) ...<Widget>[
-                  const SizedBox(height: 12),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: AppTheme.danger.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(AppTheme.radiusMd),
-                      border: Border.all(
-                          color: AppTheme.danger.withValues(alpha: 0.4)),
-                    ),
-                    child: Row(
-                      children: <Widget>[
-                        const Icon(Icons.error_outline,
-                            color: AppTheme.danger, size: 18),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            _captureError!,
-                            style: const TextStyle(color: AppTheme.danger),
-                          ),
+                  ],
+                  const SizedBox(height: 16),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () =>
+                              Navigator.of(context).pushNamed('/canon'),
+                          icon: const Icon(Icons.camera),
+                          label: const Text('Canon Setup'),
                         ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () =>
+                              Navigator.of(context).pushNamed('/settings'),
+                          icon: const Icon(Icons.settings),
+                          label: const Text('Settings'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        flex: 2,
+                        child: GradientButton(
+                          expand: true,
+                          label: 'Mulai Capture ($total foto)',
+                          icon: Icons.camera_alt_rounded,
+                          onPressed: _startSession,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
-                const SizedBox(height: 16),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: _sessionRunning
-                            ? null
-                            : () => Navigator.of(context).pushNamed('/canon'),
-                        icon: const Icon(Icons.camera),
-                        label: const Text('Canon Setup'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: _sessionRunning
-                            ? null
-                            : () => Navigator.of(context).pushNamed('/settings'),
-                        icon: const Icon(Icons.settings),
-                        label: const Text('Settings'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      flex: 2,
-                      child: GradientButton(
-                        expand: true,
-                        label: _sessionRunning
-                            ? 'Mengambil foto...'
-                            : 'Mulai Capture ($total foto)',
-                        icon: Icons.camera_alt_rounded,
-                        onPressed: _sessionRunning ? null : _startSession,
-                      ),
-                    ),
-                  ],
-                ),
               ],
             ),
           ),
@@ -1275,7 +1439,9 @@ class _BoothPageState extends State<BoothPage> {
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.tonalIcon(
-                      onPressed: _uploading || _shots.isEmpty
+                      onPressed: _uploading ||
+                              _shots.isEmpty ||
+                              (_paid != null && _lastUploadedSessionId != null)
                           ? null
                           : _uploadCurrentSessionToServer,
                       icon: _uploading
@@ -1294,7 +1460,9 @@ class _BoothPageState extends State<BoothPage> {
                             ? 'Mengunggah ke server...'
                             : _lastUploadedSessionId == null
                                 ? 'Simpan ke Server (Monolith)'
-                                : 'Tersimpan #$_lastUploadedSessionId – upload ulang',
+                                : _paid != null
+                                    ? 'Tersimpan #$_lastUploadedSessionId'
+                                    : 'Tersimpan #$_lastUploadedSessionId – upload ulang',
                       ),
                     ),
                   ),
@@ -1454,7 +1622,11 @@ class _BoothPageState extends State<BoothPage> {
                                   fontWeight: FontWeight.w700,
                                 ),
                       ),
-                      onPressed: () {
+                      onPressed: () async {
+                        // Verifikasi pembayaran (scan QR) sebelum booth jalan.
+                        if (!await _ensurePaid() || !mounted) {
+                          return;
+                        }
                         setState(() {
                           _stage = _BoothStage.frameSelection;
                         });
@@ -1742,8 +1914,11 @@ class _BoothPageState extends State<BoothPage> {
       );
     }
 
+    // cover: gambar kamera memenuhi seluruh bingkai (tanpa pita kosong di
+    // sisi). Bagian yang berlebih terpotong oleh ClipRRect pembungkusnya.
     return FittedBox(
-      fit: BoxFit.contain,
+      fit: BoxFit.cover,
+      clipBehavior: Clip.hardEdge,
       child: SizedBox(
         width: 1000,
         height: 1000 / controller.value.aspectRatio,
@@ -1783,103 +1958,6 @@ enum _BoothStage {
   compose,
   filterSelect,
   result,
-}
-
-/// Angka countdown besar di tengah live view.
-class _CountdownOverlay extends StatelessWidget {
-  const _CountdownOverlay({required this.value});
-
-  final int value;
-
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: Colors.black.withValues(alpha: 0.35),
-      child: Center(
-        child: TweenAnimationBuilder<double>(
-          key: ValueKey<int>(value),
-          tween: Tween<double>(begin: 0.6, end: 1),
-          duration: const Duration(milliseconds: 320),
-          curve: Curves.easeOutBack,
-          builder: (BuildContext context, double scale, Widget? child) {
-            return Transform.scale(scale: scale, child: child);
-          },
-          child: Container(
-            width: 168,
-            height: 168,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: AppTheme.accentGradient,
-              boxShadow: <BoxShadow>[
-                BoxShadow(
-                  color: AppTheme.accent.withValues(alpha: 0.45),
-                  blurRadius: 60,
-                  spreadRadius: 6,
-                ),
-              ],
-            ),
-            child: Text(
-              '$value',
-              style: const TextStyle(
-                fontSize: 86,
-                fontWeight: FontWeight.w900,
-                color: Color(0xFF17130A),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Indikator titik untuk menunjukkan progres jumlah foto.
-class _ShotProgress extends StatelessWidget {
-  const _ShotProgress({required this.total, required this.taken});
-
-  final int total;
-  final int taken;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.45),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.white24),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Text(
-            '$taken/$total',
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-              fontSize: 13,
-            ),
-          ),
-          const SizedBox(width: 10),
-          ...List<Widget>.generate(
-            total,
-            (int index) => Padding(
-              padding: const EdgeInsets.only(right: 5),
-              child: Container(
-                width: 9,
-                height: 9,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: index < taken ? AppTheme.accent : Colors.white24,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// Kartu hasil foto di halaman result, lengkap dengan tombol retake.
@@ -2364,17 +2442,28 @@ class _InfoPill extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Colors.black45,
+        color: Colors.black.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white12),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            Icon(icon, size: 18),
+            Icon(icon, size: 18, color: AppTheme.accent),
             const SizedBox(width: 8),
-            Flexible(child: Text(text, overflow: TextOverflow.ellipsis)),
+            Flexible(
+              child: Text(
+                text,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+            ),
           ],
         ),
       ),

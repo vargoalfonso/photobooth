@@ -17,9 +17,12 @@ class PhotoBoothConfig extends ChangeNotifier {
   /// membuat sesi lewat `POST /api/photo-sessions`.
   int apiBoothId = 1;
 
-  /// Master switch untuk fitur upload/API. Kalau false, tombol upload ke
-  /// server dinonaktifkan dan `PhotoboothApiService.fromConfig` return null.
-  bool apiEnabled = false;
+  /// Aplikasi selalu memakai API monolith (tidak ada switch aktif/nonaktif).
+  bool get apiEnabled => true;
+
+  /// Bila true, booth baru bisa dimulai setelah pelanggan membayar lewat QR
+  /// (diverifikasi ke dashboard).
+  bool requirePayment = true;
 
   // ----------------------------------------------------- Canon EOS R100
   /// Saat true, live view dan hasil foto diambil dari Canon EOS R100
@@ -44,7 +47,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   bool showGrid = true;
   BoothFlipMode flipMode = BoothFlipMode.livePreviewOnly;
   BoothAspectRatio aspectRatio = BoothAspectRatio.auto;
-  int countdownSeconds = 3;
+  int countdownSeconds = 10;
   int? photoCountOverride;
   ResolutionPreset resolutionPreset = ResolutionPreset.high;
   String? preferredCameraId;
@@ -72,7 +75,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   double printHorizontalOffset = 0.0;
   double printVerticalOffset = 0.0;
   bool enable2Rto4RConversion = false;
-  int firstPhotoCountdownSeconds = 5;
+  int firstPhotoCountdownSeconds = 10;
   bool disablePreviewCountdownTimer = false;
   int previewCountdownSeconds = 5;
   int nextPhotoCountdownSeconds = 5;
@@ -763,8 +766,8 @@ class PhotoBoothConfig extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setApiEnabled(bool value) {
-    apiEnabled = value;
+  void setRequirePayment(bool value) {
+    requirePayment = value;
     notifyListeners();
   }
 

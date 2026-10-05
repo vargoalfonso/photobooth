@@ -8,6 +8,7 @@ import 'dart:typed_data';
 
 import '../models/api_models.dart';
 import '../models/booth_models.dart';
+import '../models/payment_models.dart';
 import '../state/photo_booth_config.dart';
 import 'monolith_api_client.dart';
 
@@ -64,6 +65,62 @@ class PhotoboothApiService {
           .toList(growable: false);
     }
     return const <PhotoFrameDto>[];
+  }
+
+  // -------------------------------------------------------------- Payments
+
+  /// GET /api/packages — paket foto aktif.
+  Future<List<PackageDto>> listPackages() async {
+    final Map<String, dynamic> raw = await _client.getJson('packages');
+    final Object? data = raw['data'];
+    if (data is List) {
+      return data
+          .whereType<Map<String, dynamic>>()
+          .map(PackageDto.fromJson)
+          .toList(growable: false);
+    }
+    return const <PackageDto>[];
+  }
+
+  /// POST /api/payments — buat sesi pending + transaksi Midtrans.
+  /// `paymentUrl` pada hasilnya adalah isi QR yang harus ditampilkan.
+  Future<PaymentDto> createPayment({
+    required int packageId,
+    int? boothId,
+    String? customerName,
+  }) async {
+    final Map<String, dynamic> raw = await _client.postJson(
+      'payments',
+      body: <String, dynamic>{
+        'photo_package_id': packageId,
+        if (boothId != null) 'booth_id': boothId,
+        if (customerName != null && customerName.isNotEmpty)
+          'customer_name': customerName,
+      },
+    );
+    return _extractPayment(raw);
+  }
+
+  /// GET /api/payments/{order_id} — polling status.
+  Future<PaymentDto> getPayment(String orderId) async {
+    final Map<String, dynamic> raw =
+        await _client.getJson('payments/$orderId');
+    return _extractPayment(raw);
+  }
+
+  /// POST /api/payments/{order_id}/cancel — batalkan bila masih pending.
+  Future<PaymentDto> cancelPayment(String orderId) async {
+    final Map<String, dynamic> raw =
+        await _client.postJson('payments/$orderId/cancel');
+    return _extractPayment(raw);
+  }
+
+  PaymentDto _extractPayment(Map<String, dynamic> raw) {
+    final Object? data = raw['data'];
+    if (data is Map<String, dynamic>) {
+      return PaymentDto.fromJson(data);
+    }
+    return PaymentDto.fromJson(raw);
   }
 
   // -------------------------------------------------------------- Sessions
