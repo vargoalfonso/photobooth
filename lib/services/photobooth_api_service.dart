@@ -67,6 +67,94 @@ class PhotoboothApiService {
     return const <PhotoFrameDto>[];
   }
 
+  /// GET /api/templates lalu ubah jadi [BoothFrameOption] bertipe template
+  /// (strip vertikal dengan posisi slot dari `layout_json`). Template tanpa
+  /// slot dilewati karena tidak bisa diisi foto.
+  Future<List<BoothFrameOption>> listRemoteFrames({String? category}) async {
+    final List<PhotoFrameDto> dtos = await listTemplates(category: category);
+    final String host = _client.hostBaseUrl;
+    return dtos
+        .where((PhotoFrameDto d) => d.isActive && d.slotCount > 0)
+        .map((PhotoFrameDto d) =>
+            BoothFrameOption.fromTemplate(d, hostBaseUrl: host))
+        .where((BoothFrameOption f) => f.slotCount > 0)
+        .toList(growable: false);
+  }
+
+  /// GET /api/frame-backgrounds -> peta `frame_key` ke [FrameBackgroundInfo]
+  /// (gambar background + area foto) untuk frame bawaan Flutter.
+  Future<Map<String, FrameBackgroundInfo>> listFrameBackgrounds() async {
+    final Map<String, dynamic> raw = await _client.getJson('frame-backgrounds');
+    final Object? data = raw['data'];
+    final RegExp leadingSlashes = RegExp(r'^/+');
+    final String host = _client.hostBaseUrl;
+    final Map<String, FrameBackgroundInfo> result =
+        <String, FrameBackgroundInfo>{};
+
+    double num0(Object? v, double fallback) =>
+        v is num ? v.toDouble() : (double.tryParse(v?.toString() ?? '') ?? fallback);
+
+    if (data is List) {
+      for (final Map<String, dynamic> item
+          in data.whereType<Map<String, dynamic>>()) {
+        final String key = item['frame_key']?.toString() ?? '';
+        String url = item['image_url']?.toString() ?? '';
+        if (key.isEmpty || url.isEmpty) continue;
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          url = '$host/${url.replaceAll(leadingSlashes, '')}';
+        }
+
+        final double w = num0(item['width'], 0);
+        final double h = num0(item['height'], 0);
+        final Object? area = item['area'];
+        final Map<String, dynamic> a =
+            area is Map<String, dynamic> ? area : const <String, dynamic>{};
+
+        result[key] = FrameBackgroundInfo(
+          url: url,
+          aspect: (w > 0 && h > 0) ? w / h : null,
+          areaX: num0(a['x'], 4),
+          areaY: num0(a['y'], 3),
+          areaW: num0(a['w'], 92),
+          areaH: num0(a['h'], 94),
+        );
+      }
+    }
+    return result;
+  }
+
+  /// Ambil template dari server dan simpan ke [config.remoteFrames].
+  /// Aman dipanggil kapan saja: gagal koneksi hanya mengisi `remoteFramesError`
+  /// dan frame bawaan tetap bisa dipakai.
+  static Future<void> syncFrames(PhotoBoothConfig config) async {
+    final PhotoboothApiService? svc = PhotoboothApiService.fromConfig(config);
+    if (svc == null) {
+      config.setRemoteFrames(const <BoothFrameOption>[]);
+      config.setFrameBackgrounds(const <String, FrameBackgroundInfo>{});
+      return;
+    }
+    config.setRemoteFramesLoading(true);
+    try {
+      try {
+        config.setRemoteFrames(await svc.listRemoteFrames());
+      } on ApiException catch (e) {
+        config.setRemoteFrames(config.remoteFrames, error: e.message);
+      } catch (e) {
+        config.setRemoteFrames(
+          config.remoteFrames,
+          error: 'Tidak bisa menghubungi server: $e',
+        );
+      }
+
+      // Background frame bawaan. Gagal/belum ada endpoint -> pakai yang lama.
+      try {
+        config.setFrameBackgrounds(await svc.listFrameBackgrounds());
+      } catch (_) {}
+    } finally {
+      svc.close();
+    }
+  }
+
   // -------------------------------------------------------------- Payments
 
   /// GET /api/packages — paket foto aktif.

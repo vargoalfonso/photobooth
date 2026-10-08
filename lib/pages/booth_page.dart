@@ -71,8 +71,9 @@ class _BoothPageState extends State<BoothPage> {
           ? _BoothStage.landing
           : _BoothStage.frameSelection;
 
-  /// Jumlah foto sesi ini: ikut paket yang dibayar, bukan pengaturan lokal.
-  int get _photosTotal => _paid?.allowedTakes ?? widget.config.photosPerSession;
+  /// Jumlah jepretan sesi ini: selalu 8 (customer memilih foto terbaik
+  /// untuk mengisi slot frame di layar compose).
+  int get _photosTotal => kBoothShotsPerSession;
 
   /// Tampilkan layar QR dan tunggu status paid. True bila boleh lanjut.
   Future<bool> _ensurePaid() async {
@@ -102,6 +103,28 @@ class _BoothPageState extends State<BoothPage> {
   int _retakeCount = 0;
   String? _captureError;
 
+  // --- filter sumber frame pada layar "Select Your Frame" ---
+  _FrameSource _frameSource = _FrameSource.all;
+
+  List<BoothFrameOption> get _visibleFrames {
+    switch (_frameSource) {
+      case _FrameSource.defaults:
+        return widget.config.defaultFrames;
+      case _FrameSource.server:
+        return widget.config.remoteFrames;
+      case _FrameSource.all:
+        return widget.config.allFrames;
+    }
+  }
+
+  /// Versi terbaru sebuah frame (mis. setelah background selesai diunduh).
+  BoothFrameOption _fresh(BoothFrameOption frame) {
+    for (final BoothFrameOption f in widget.config.allFrames) {
+      if (f.id == frame.id) return f;
+    }
+    return frame;
+  }
+
   // --- state compose (frame mockup + slot assignment) ---
   /// Frame yang sedang aktif untuk compose/filter/print. Bisa diganti di
   /// layar compose lewat chip.
@@ -119,11 +142,19 @@ class _BoothPageState extends State<BoothPage> {
   /// dari tray thumbnail. Null bila belum ada slot yang dipilih.
   int? _selectedSlot;
 
+  /// Foto beda-beda per slot, atau foto yang sama dicetak double.
+  BoothPhotoMode _printMode = BoothPhotoMode.different;
+
+  /// Jumlah foto unik yang harus dipilih untuk frame + mode saat ini.
+  int get _slotTotal => _activeFrame.uniqueSlotCount(_printMode);
+
   @override
   void initState() {
     super.initState();
     _pendingFrame = widget.config.frame;
     _stage = _initialStage;
+    // Segarkan template dari /api/templates setiap booth dibuka.
+    unawaited(PhotoboothApiService.syncFrames(widget.config));
     widget.config.addListener(_handleConfigChanged);
     widget.canon.addListener(_handleCanonChanged);
     _bootCamera();
@@ -461,11 +492,8 @@ class _BoothPageState extends State<BoothPage> {
 
     final int total = _photosTotal;
     for (int index = 0; index < total; index++) {
-      final int seconds = index == 0
-          ? widget.config.firstPhotoCountdownSeconds
-          : widget.config.countdownSeconds;
-
-      await _runCountdown(seconds);
+      // Jeda tetap 10 detik sebelum setiap jepretan.
+      await _runCountdown(kBoothShotDelaySeconds);
       if (!mounted || !_sessionRunning) {
         return;
       }
@@ -601,7 +629,7 @@ class _BoothPageState extends State<BoothPage> {
       _retakeCount += 1;
     });
 
-    await _runCountdown(widget.config.countdownSeconds);
+    await _runCountdown(kBoothShotDelaySeconds);
     final BoothShot? shot = await _captureOne();
     if (!mounted) {
       return;
@@ -626,8 +654,9 @@ class _BoothPageState extends State<BoothPage> {
   /// customer sendiri yang menempatkan foto dari tray di bawah. Slot pertama
   /// langsung terpilih supaya customer bisa langsung tap foto.
   void _initSlotsForFrame(BoothFrameOption frame) {
-    _slotAssignments = List<int?>.filled(frame.slotCount, null);
-    _selectedSlot = frame.slotCount > 0 ? 0 : null;
+    final int count = frame.uniqueSlotCount(_printMode);
+    _slotAssignments = List<int?>.filled(count, null);
+    _selectedSlot = count > 0 ? 0 : null;
   }
 
   /// Index slot kosong pertama, atau null bila semua sudah terisi.
@@ -640,12 +669,11 @@ class _BoothPageState extends State<BoothPage> {
   /// assignment sebelumnya; kelebihan slot dipotong, slot tambahan kosong.
   void _switchComposeFrame(BoothFrameOption frame) {
     final List<int?> previous = List<int?>.from(_slotAssignments);
-    final List<int?> next = List<int?>.filled(frame.slotCount, null);
+    final int count = frame.uniqueSlotCount(_printMode);
+    final List<int?> next = List<int?>.filled(count, null);
 
     // Salin assignment lama sebanyak mungkin.
-    final int copy = frame.slotCount < previous.length
-        ? frame.slotCount
-        : previous.length;
+    final int copy = count < previous.length ? count : previous.length;
     for (int i = 0; i < copy; i++) {
       next[i] = previous[i];
     }
@@ -653,6 +681,26 @@ class _BoothPageState extends State<BoothPage> {
     // Slot tambahan dibiarkan kosong; customer mengisinya dari tray.
     setState(() {
       _activeFrame = frame;
+      _slotAssignments = next;
+      _selectedSlot = _firstEmptySlot();
+    });
+  }
+
+  /// Ganti mode foto beda-beda <-> double di layar compose. Pilihan foto
+  /// yang sudah ada dipertahankan sebanyak mungkin.
+  void _switchPrintMode(BoothPhotoMode mode) {
+    if (mode == _printMode) {
+      return;
+    }
+    final List<int?> previous = List<int?>.from(_slotAssignments);
+    final int count = _activeFrame.uniqueSlotCount(mode);
+    final List<int?> next = List<int?>.filled(count, null);
+    final int copy = count < previous.length ? count : previous.length;
+    for (int i = 0; i < copy; i++) {
+      next[i] = previous[i];
+    }
+    setState(() {
+      _printMode = mode;
       _slotAssignments = next;
       _selectedSlot = _firstEmptySlot();
     });
@@ -738,29 +786,51 @@ class _BoothPageState extends State<BoothPage> {
     setState(() => _uploading = true);
 
     try {
-      // 1) Cari template dari server yang cocok dengan jumlah slot foto.
-      final List<PhotoFrameDto> templates = await svc.listTemplates();
-      PhotoFrameDto? match;
-      final int photoCount = _shots.length;
-      for (final PhotoFrameDto t in templates) {
-        if (t.slotCount == photoCount) {
-          match = t;
-          break;
+      // 1) Tentukan template di server. Frame yang dipilih dari /api/templates
+      //    sudah membawa id-nya; frame bawaan Flutter dicocokkan berdasarkan
+      //    jumlah slot seperti sebelumnya.
+      int? frameId = _activeFrame.remoteId;
+      if (frameId == null) {
+        final List<PhotoFrameDto> templates = await svc.listTemplates();
+        PhotoFrameDto? match;
+        final int photoCount = _shots.length;
+        for (final PhotoFrameDto t in templates) {
+          if (t.slotCount == photoCount) {
+            match = t;
+            break;
+          }
         }
+        match ??= templates.isNotEmpty ? templates.first : null;
+        frameId = match?.id;
       }
-      match ??= templates.isNotEmpty ? templates.first : null;
 
-      if (match == null) {
+      if (frameId == null) {
         _showSnack(
           'Tidak ada template aktif di server. Buat dulu di dashboard monolith.',
         );
         return;
       }
 
-      // 2) Siapkan payload photos[].
+      // 2) Siapkan payload photos[]. Tanpa pembayaran, server mewajibkan
+      //    jumlah foto == jumlah slot template, jadi kirim foto sesuai urutan
+      //    slot. Sesi berbayar mengirim semua jepretan (dibatasi paket).
+      final bool slotOrdered = _activeFrame.isRemote && _paid == null;
+      final List<BoothShot> source = slotOrdered
+          ? <BoothShot>[
+              for (final int? a in _slotAssignments)
+                if (a != null && a < _shots.length) _shots[a],
+            ]
+          : _shots;
+      if (slotOrdered && source.length != _activeFrame.slotCount) {
+        _showSnack(
+          'Isi semua ${_activeFrame.slotCount} slot template dulu sebelum upload.',
+        );
+        return;
+      }
+
       final List<PhotoUpload> uploads = <PhotoUpload>[];
-      for (int i = 0; i < _shots.length; i++) {
-        final BoothShot shot = _shots[i];
+      for (int i = 0; i < source.length; i++) {
+        final BoothShot shot = source[i];
         final Uint8List? bytes = shot.bytes;
         final String? path = shot.filePath;
         final String filename =
@@ -791,7 +861,7 @@ class _BoothPageState extends State<BoothPage> {
         }
         session = await svc.updateSession(
           sessionId: paid.sessionId,
-          photoFrameId: match.id,
+          photoFrameId: frameId,
           filter: filterToApiString(_activeFilter),
           layout: _activeFrame.id,
           takenAt: DateTime.now(),
@@ -799,7 +869,7 @@ class _BoothPageState extends State<BoothPage> {
       } else {
         session = await svc.createSession(
           boothId: widget.config.apiBoothId,
-          photoFrameId: match.id,
+          photoFrameId: frameId,
           photos: uploads,
           filter: filterToApiString(_activeFilter),
           layout: _activeFrame.id,
@@ -1131,7 +1201,7 @@ class _BoothPageState extends State<BoothPage> {
                         flex: 2,
                         child: GradientButton(
                           expand: true,
-                          label: 'Mulai Capture ($total foto)',
+                          label: 'Mulai Capture ($total foto, jeda ${kBoothShotDelaySeconds}s)',
                           icon: Icons.camera_alt_rounded,
                           onPressed: _startSession,
                         ),
@@ -1150,7 +1220,7 @@ class _BoothPageState extends State<BoothPage> {
   // -------------------------------------------------- layar compose (mockup)
   Widget _buildComposeScreen(BuildContext context) {
     final int filled = _slotAssignments.where((int? v) => v != null).length;
-    final int total = _activeFrame.slotCount;
+    final int total = _slotTotal;
     final bool allFilled = filled == total && total > 0;
     final int? selected = _selectedSlot;
     final bool selectionHasPhoto = selected != null &&
@@ -1168,7 +1238,7 @@ class _BoothPageState extends State<BoothPage> {
                 SectionHeader(
                   title: 'Susun Frame',
                   subtitle: selected == null
-                      ? 'Tap slot lalu pilih foto di bawah. $filled/$total slot terisi.'
+                      ? 'Pilih $total foto terbaik dari ${_shots.length} jepretan. $filled/$total slot terisi.'
                       : 'Slot ${selected + 1} dipilih — tap foto di bawah untuk menempatkan.',
                   trailing: StatusBadge(
                     label: '$filled/$total slot',
@@ -1182,10 +1252,10 @@ class _BoothPageState extends State<BoothPage> {
                   height: 44,
                   child: ListView.separated(
                     scrollDirection: Axis.horizontal,
-                    itemCount: kFrameOptions.length,
+                    itemCount: widget.config.allFrames.length,
                     separatorBuilder: (_, __) => const SizedBox(width: 10),
                     itemBuilder: (BuildContext ctx, int i) {
-                      final BoothFrameOption f = kFrameOptions[i];
+                      final BoothFrameOption f = widget.config.allFrames[i];
                       return _FrameChip(
                         frame: f,
                         selected: f.id == _activeFrame.id,
@@ -1194,11 +1264,24 @@ class _BoothPageState extends State<BoothPage> {
                     },
                   ),
                 ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 10,
+                  children: <Widget>[
+                    for (final BoothPhotoMode mode in BoothPhotoMode.values)
+                      ChoiceChip(
+                        label: Text(mode.label),
+                        selected: _printMode == mode,
+                        onSelected: (_) => _switchPrintMode(mode),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
                 Expanded(
                   child: Center(
                     child: _StripPreview(
-                      frame: _activeFrame,
+                      frame: _fresh(_activeFrame),
+                      printMode: _printMode,
                       shots: _shots,
                       assignments: _slotAssignments,
                       selectedSlot: _selectedSlot,
@@ -1316,7 +1399,8 @@ class _BoothPageState extends State<BoothPage> {
                 Expanded(
                   child: Center(
                     child: _StripPreview(
-                      frame: _activeFrame,
+                      frame: _fresh(_activeFrame),
+                      printMode: _printMode,
                       shots: _shots,
                       assignments: _slotAssignments,
                       selectedSlot: null,
@@ -1751,9 +1835,47 @@ class _BoothPageState extends State<BoothPage> {
                                         .withValues(alpha: 0.96),
                                     borderRadius: BorderRadius.circular(14),
                                   ),
-                                  child: const Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: _FrameCategoryChip(label: 'All'),
+                                  child: Row(
+                                    children: <Widget>[
+                                      Expanded(
+                                        child: Wrap(
+                                          spacing: 10,
+                                          runSpacing: 6,
+                                          children: <Widget>[
+                                            for (final _FrameSource src
+                                                in _FrameSource.values)
+                                              ChoiceChip(
+                                                label: Text(
+                                                  '${src.label} (${_countFor(src)})',
+                                                ),
+                                                selected: _frameSource == src,
+                                                onSelected: (_) => setState(
+                                                    () => _frameSource = src),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      widget.config.remoteFramesLoading
+                                          ? const Padding(
+                                              padding: EdgeInsets.all(10),
+                                              child: SizedBox(
+                                                width: 20,
+                                                height: 20,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                        strokeWidth: 2.5),
+                                              ),
+                                            )
+                                          : TextButton.icon(
+                                              onPressed: () =>
+                                                  PhotoboothApiService
+                                                      .syncFrames(
+                                                          widget.config),
+                                              icon: const Icon(Icons.sync),
+                                              label: const Text('Sync Server'),
+                                            ),
+                                    ],
                                   ),
                                 ),
                                 const SizedBox(height: 14),
@@ -1767,10 +1889,47 @@ class _BoothPageState extends State<BoothPage> {
                                       borderRadius: BorderRadius.circular(14),
                                     ),
                                     child: SingleChildScrollView(
-                                      child: Wrap(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: <Widget>[
+                                          if (_frameSource !=
+                                                  _FrameSource.defaults &&
+                                              widget.config.remoteFramesError !=
+                                                  null)
+                                            Padding(
+                                              padding: const EdgeInsets.only(
+                                                  bottom: 12),
+                                              child: Text(
+                                                'Template server gagal dimuat: '
+                                                '${widget.config.remoteFramesError}',
+                                                style: const TextStyle(
+                                                  color: Color(0xFF9B2C2C),
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ),
+                                          if (_frameSource ==
+                                                  _FrameSource.server &&
+                                              widget.config.remoteFrames
+                                                  .isEmpty &&
+                                              !widget.config
+                                                  .remoteFramesLoading)
+                                            const Padding(
+                                              padding:
+                                                  EdgeInsets.only(bottom: 12),
+                                              child: Text(
+                                                'Belum ada template aktif di server. '
+                                                'Buat di dashboard monolith lalu tekan Sync Server.',
+                                                style: TextStyle(
+                                                  color: Color(0xFF4A443C),
+                                                ),
+                                              ),
+                                            ),
+                                          Wrap(
                                         spacing: 16,
                                         runSpacing: 16,
-                                        children: kFrameOptions
+                                        children: _visibleFrames
                                             .map(
                                               (BoothFrameOption frame) =>
                                                   _FrameSelectionCard(
@@ -1785,6 +1944,8 @@ class _BoothPageState extends State<BoothPage> {
                                               ),
                                             )
                                             .toList(),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ),
@@ -1833,10 +1994,38 @@ class _BoothPageState extends State<BoothPage> {
                                   Expanded(
                                     child: Center(
                                       child: _LargeFramePreview(
-                                          frame: _pendingFrame),
+                                        frame: _fresh(_pendingFrame),
+                                        printMode: _printMode,
+                                      ),
                                     ),
                                   ),
-                                  const SizedBox(height: 18),
+                                  const SizedBox(height: 12),
+                                  Wrap(
+                                    alignment: WrapAlignment.center,
+                                    spacing: 10,
+                                    children: <Widget>[
+                                      for (final BoothPhotoMode mode
+                                          in BoothPhotoMode.values)
+                                        ChoiceChip(
+                                          label: Text(mode.label),
+                                          selected: _printMode == mode,
+                                          onSelected: (_) => setState(
+                                              () => _printMode = mode),
+                                        ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    '${_printMode.hint} Pilih '
+                                    '${_pendingFrame.uniqueSlotCount(_printMode)} '
+                                    'foto dari $kBoothShotsPerSession jepretan.',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Color(0xFF4A443C),
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
                                   SizedBox(
                                     width: double.infinity,
                                     child: FilledButton(
@@ -1888,6 +2077,17 @@ class _BoothPageState extends State<BoothPage> {
         ],
       ),
     );
+  }
+
+  int _countFor(_FrameSource src) {
+    switch (src) {
+      case _FrameSource.defaults:
+        return widget.config.defaultFrames.length;
+      case _FrameSource.server:
+        return widget.config.remoteFrames.length;
+      case _FrameSource.all:
+        return widget.config.allFrames.length;
+    }
   }
 
   bool _isImagePath(String? path) {
@@ -2107,28 +2307,14 @@ class _ConfiguredLogo extends StatelessWidget {
   }
 }
 
-class _FrameCategoryChip extends StatelessWidget {
-  const _FrameCategoryChip({required this.label});
+/// Asal frame pada layar pilih frame: bawaan Flutter atau template server.
+enum _FrameSource {
+  all('All'),
+  defaults('Default'),
+  server('Server');
 
+  const _FrameSource(this.label);
   final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF2C2C2C),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
 }
 
 class _FrameSelectionCard extends StatelessWidget {
@@ -2169,8 +2355,12 @@ class _FrameSelectionCard extends StatelessWidget {
         child: Column(
           children: <Widget>[
             AspectRatio(
-              aspectRatio: 0.78,
-              child: _LargeFramePreview(frame: frame, compact: true),
+              aspectRatio: frame.previewAspect,
+              child: _LargeFramePreview(
+                frame: frame,
+                compact: true,
+                printMode: BoothPhotoMode.different,
+              ),
             ),
             const SizedBox(height: 10),
             Text(
@@ -2189,40 +2379,375 @@ class _FrameSelectionCard extends StatelessWidget {
   }
 }
 
+/// Menyisipkan jarak antar item pada Row/Column.
+List<Widget> _withGaps(List<Widget> items, double gap) {
+  final List<Widget> out = <Widget>[];
+  for (int i = 0; i < items.length; i++) {
+    out.add(items[i]);
+    if (i != items.length - 1) {
+      out.add(SizedBox(width: gap, height: gap));
+    }
+  }
+  return out;
+}
+
+/// Ukuran maksimum lembar frame (strip / grid) pada layar.
+Size _sheetMaxSize(BoothFrameOption frame, BoothPhotoMode mode) {
+  final bool doubled = frame.stripCopies(mode) == 2;
+  if (frame.hasBackground) {
+    // Lebar mengikuti rasio gambar; strip double = dua lembar berdampingan
+    // (vertikal) atau bertumpuk (horizontal).
+    final double one = frame.backgroundAspect;
+    final double total = !doubled
+        ? one
+        : (frame.isHorizontal ? one / 2 : one * 2);
+    return Size((560 * total).clamp(160.0, 760.0).toDouble(), 600);
+  }
+  switch (frame.layout) {
+    case BoothFrameLayout.stripVertical:
+      return Size(doubled ? 440 : 260, frame.slotCount >= 4 ? 580 : 470);
+    case BoothFrameLayout.stripHorizontal:
+      return Size(560, doubled ? 420 : 230);
+    case BoothFrameLayout.gridPortrait:
+      return Size(340, frame.slotCount >= 8 ? 600 : 500);
+    case BoothFrameLayout.gridLandscape:
+      return Size(
+        frame.slotCount >= 8 ? 760 : (frame.slotCount >= 6 ? 620 : 480),
+        380,
+      );
+    case BoothFrameLayout.template:
+      {
+        // Tinggi tetap, lebar mengikuti rasio kanvas template (vertikal ->
+        // sempit & tinggi). 540 = tinggi lembar setelah padding/border/judul.
+        const double sheetHeight = 540;
+        final double one = sheetHeight * frame.canvasAspect + 40;
+        final double width = doubled ? one * 2 - 26 : one;
+        return Size(width.clamp(160.0, 760.0).toDouble(), 600);
+      }
+  }
+}
+
+/// Menyusun isi lembar frame sesuai layout. [slotBuilder] dipanggil dengan
+/// index slot unik, jadi pada mode double dua sel bisa menampilkan foto yang
+/// sama.
+Widget _buildFrameSheet({
+  required BoothFrameOption frame,
+  required BoothPhotoMode mode,
+  required Widget Function(int source) slotBuilder,
+  bool showCaptions = true,
+  double gap = 8,
+  bool single = false,
+}) {
+  // Frame ber-background: gambar penuh jadi dasar lembar, foto hanya di area
+  // yang diatur dari dashboard. Strip double = dua lembar yang sama.
+  if (!single && frame.hasBackground && !frame.isTemplate) {
+    Widget one() => _BackgroundSheet(
+          frame: frame,
+          child: _buildFrameSheet(
+            frame: frame,
+            mode: mode,
+            slotBuilder: slotBuilder,
+            showCaptions: showCaptions,
+            gap: gap,
+            single: true,
+          ),
+        );
+    if (frame.stripCopies(mode) == 1) return one();
+    final List<Widget> copies = <Widget>[
+      Expanded(child: one()),
+      Expanded(child: one()),
+    ];
+    return frame.isHorizontal
+        ? Column(children: _withGaps(copies, gap))
+        : Row(children: _withGaps(copies, gap));
+  }
+
+  final List<int> src = frame.cellSources(mode);
+  Widget cell(int c) => slotBuilder(src[c]);
+
+  const TextStyle captionStyle = TextStyle(
+    color: Color(0xFF656565),
+    fontSize: 9,
+    fontWeight: FontWeight.w600,
+    height: 1.15,
+  );
+
+  switch (frame.layout) {
+    case BoothFrameLayout.stripVertical:
+      {
+        Widget strip() => Column(
+              children: _withGaps(<Widget>[
+                for (int i = 0; i < frame.slotCount; i++)
+                  Expanded(child: cell(i)),
+              ], gap),
+            );
+        if (single || frame.stripCopies(mode) == 1) {
+          return strip();
+        }
+        return Row(
+          children: _withGaps(<Widget>[
+            Expanded(child: strip()),
+            Expanded(child: strip()),
+          ], gap + 6),
+        );
+      }
+    case BoothFrameLayout.stripHorizontal:
+      {
+        Widget strip() => Row(
+              children: _withGaps(<Widget>[
+                for (int i = 0; i < frame.slotCount; i++)
+                  Expanded(child: cell(i)),
+              ], gap),
+            );
+        if (single || frame.stripCopies(mode) == 1) {
+          return strip();
+        }
+        return Column(
+          children: _withGaps(<Widget>[
+            Expanded(child: strip()),
+            Expanded(child: strip()),
+          ], gap + 6),
+        );
+      }
+    case BoothFrameLayout.template:
+      {
+        Widget sheet() => _TemplateSheet(frame: frame, slotBuilder: cell);
+        if (frame.stripCopies(mode) == 1) {
+          return sheet();
+        }
+        return Row(
+          children: _withGaps(<Widget>[
+            Expanded(child: sheet()),
+            Expanded(child: sheet()),
+          ], gap + 6),
+        );
+      }
+    case BoothFrameLayout.gridPortrait:
+      {
+        final int rows = frame.slotCount ~/ 2;
+        Widget captioned(int c) {
+          final String caption = frame.captionFor(src[c]);
+          return Row(
+            children: <Widget>[
+              Expanded(child: cell(c)),
+              if (showCaptions && caption.isNotEmpty) ...<Widget>[
+                const SizedBox(width: 4),
+                SizedBox(
+                  width: 46,
+                  child: Text(
+                    caption,
+                    style: captionStyle,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ],
+          );
+        }
+
+        return Column(
+          children: _withGaps(<Widget>[
+            for (int r = 0; r < rows; r++)
+              Expanded(
+                child: Row(
+                  children: _withGaps(<Widget>[
+                    Expanded(child: captioned(r * 2)),
+                    Expanded(child: captioned(r * 2 + 1)),
+                  ], gap + 4),
+                ),
+              ),
+          ], gap),
+        );
+      }
+    case BoothFrameLayout.gridLandscape:
+      {
+        final int cols = frame.slotCount ~/ 2;
+        String rowCaption(int r) => <String>[
+              for (int c = 0; c < cols; c++) frame.captionFor(src[r * cols + c]),
+            ].where((String t) => t.isNotEmpty).join('\n');
+
+        return Column(
+          children: _withGaps(<Widget>[
+            for (int r = 0; r < 2; r++)
+              Expanded(
+                child: Row(
+                  children: <Widget>[
+                    if (showCaptions) ...<Widget>[
+                      SizedBox(
+                        width: 84,
+                        child: Align(
+                          alignment: Alignment.bottomRight,
+                          child: Text(
+                            rowCaption(r),
+                            textAlign: TextAlign.right,
+                            style: captionStyle,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    Expanded(
+                      child: Row(
+                        children: _withGaps(<Widget>[
+                          for (int c = 0; c < cols; c++)
+                            Expanded(child: cell(r * cols + c)),
+                        ], gap),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ], gap),
+        );
+      }
+  }
+}
+
+/// Lembar dengan gambar background penuh (logo, tulisan, hiasan). Foto hanya
+/// ditempatkan di dalam kotak area yang diatur dari dashboard.
+class _BackgroundSheet extends StatelessWidget {
+  const _BackgroundSheet({required this.frame, required this.child});
+
+  final BoothFrameOption frame;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final FrameBackgroundInfo info = frame.background!;
+    return Center(
+      child: AspectRatio(
+        aspectRatio: frame.backgroundAspect,
+        child: LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints box) {
+            final double w = box.maxWidth;
+            final double h = box.maxHeight;
+            return ClipRect(
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  const ColoredBox(color: Colors.white),
+                  Image.network(
+                    info.url,
+                    fit: BoxFit.fill,
+                    gaplessPlayback: true,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                  ),
+                  Positioned(
+                    left: w * info.areaX / 100,
+                    top: h * info.areaY / 100,
+                    width: w * info.areaW / 100,
+                    height: h * info.areaH / 100,
+                    child: child,
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Lembar template dari server: kanvas dengan rasio asli (umumnya strip
+/// vertikal), tiap slot diposisikan memakai persen `x/y/w/h` dari
+/// `layout_json`, lalu PNG frame ditumpuk di atas foto - persis urutan
+/// render di editor PHP (foto dulu, frame terakhir).
+class _TemplateSheet extends StatelessWidget {
+  const _TemplateSheet({
+    required this.frame,
+    required this.slotBuilder,
+  });
+
+  final BoothFrameOption frame;
+
+  /// Dipanggil dengan index CELL (urutan slot di template).
+  final Widget Function(int cell) slotBuilder;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: AspectRatio(
+        aspectRatio: frame.canvasAspect,
+        child: LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints box) {
+            final double w = box.maxWidth;
+            final double h = box.maxHeight;
+            final String? url = frame.imageUrl;
+            return ClipRect(
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  const ColoredBox(color: Colors.white),
+                  for (int i = 0; i < frame.slots.length; i++)
+                    Positioned(
+                      left: w * frame.slots[i].x / 100,
+                      top: h * frame.slots[i].y / 100,
+                      width: w * frame.slots[i].w / 100,
+                      height: h * frame.slots[i].h / 100,
+                      child: slotBuilder(i),
+                    ),
+                  if (url != null && url.isNotEmpty)
+                    IgnorePointer(
+                      child: Image.network(
+                        url,
+                        fit: BoxFit.fill,
+                        gaplessPlayback: true,
+                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
 class _LargeFramePreview extends StatelessWidget {
   const _LargeFramePreview({
     required this.frame,
     this.compact = false,
+    this.printMode = BoothPhotoMode.different,
   });
 
   final BoothFrameOption frame;
   final bool compact;
+  final BoothPhotoMode printMode;
 
   @override
   Widget build(BuildContext context) {
-    final bool horizontal = frame.id == 'minimal-slate';
-    final List<Color> palette = <Color>[
-      const Color(0xFFD9A8A1),
-      const Color(0xFF9FB1D0),
-      const Color(0xFFD8B08A),
-      const Color(0xFFA88BC6),
-      const Color(0xFF9DC0A4),
-      const Color(0xFFD59AA8),
+    const List<Color> palette = <Color>[
+      Color(0xFFD9A8A1),
+      Color(0xFF9FB1D0),
+      Color(0xFFD8B08A),
+      Color(0xFFA88BC6),
+      Color(0xFF9DC0A4),
+      Color(0xFFD59AA8),
     ];
 
+    final Size sheet = _sheetMaxSize(frame, printMode);
+
     return Container(
-      width: compact ? null : 320,
       constraints: compact
           ? null
           : BoxConstraints(
-              maxWidth: horizontal ? 360 : 250,
-              maxHeight: horizontal ? 230 : 420,
+              maxWidth: sheet.width * 0.85,
+              maxHeight: sheet.height * 0.85,
             ),
-      padding: const EdgeInsets.all(12),
+      padding: frame.hasBackground
+          ? EdgeInsets.zero
+          : EdgeInsets.all(compact ? 8 : 12),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: frame.borderColor, width: compact ? 4 : 6),
+        border: frame.hasBackground
+            ? null
+            : Border.all(color: frame.borderColor, width: compact ? 4 : 6),
         boxShadow: const <BoxShadow>[
           BoxShadow(
             color: Color(0x18000000),
@@ -2231,78 +2756,16 @@ class _LargeFramePreview extends StatelessWidget {
           ),
         ],
       ),
-      child: horizontal
-          ? Column(
-              children: <Widget>[
-                const SizedBox(height: 6),
-                Expanded(
-                  child: Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: <Widget>[
-                            const _FrameTextBlock(),
-                            const _FrameTextBlock(),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        flex: 3,
-                        child: GridView.builder(
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: 6,
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            mainAxisSpacing: 8,
-                            crossAxisSpacing: 8,
-                          ),
-                          itemBuilder: (BuildContext context, int index) {
-                            return _FrameSlot(
-                              color: palette[index],
-                              label: '${index + 1}',
-                            );
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            )
-          : Row(
-              children: <Widget>[
-                Expanded(
-                  child: GridView.builder(
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: 6,
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      mainAxisSpacing: 8,
-                      crossAxisSpacing: 8,
-                    ),
-                    itemBuilder: (BuildContext context, int index) {
-                      return _FrameSlot(
-                        color: palette[index],
-                        label: '${index + 1}',
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(width: 10),
-                const Column(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: <Widget>[
-                    _FrameTextBlock(),
-                    _FrameTextBlock(),
-                    _FrameTextBlock(),
-                  ],
-                ),
-              ],
-            ),
+      child: _buildFrameSheet(
+        frame: frame,
+        mode: printMode,
+        showCaptions: !compact,
+        gap: compact ? 4 : 8,
+        slotBuilder: (int source) => _FrameSlot(
+          color: palette[source % palette.length],
+          label: '${source + 1}',
+        ),
+      ),
     );
   }
 }
@@ -2331,23 +2794,6 @@ class _FrameSlot extends StatelessWidget {
               ),
         ),
       ),
-    );
-  }
-}
-
-class _FrameTextBlock extends StatelessWidget {
-  const _FrameTextBlock();
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      'The Mystery\nPhoto Booth',
-      textAlign: TextAlign.center,
-      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: const Color(0xFF656565),
-            fontWeight: FontWeight.w600,
-            height: 1.2,
-          ),
     );
   }
 }
@@ -2509,6 +2955,7 @@ class _GridPainter extends CustomPainter {
 class _StripPreview extends StatelessWidget {
   const _StripPreview({
     required this.frame,
+    required this.printMode,
     required this.shots,
     required this.assignments,
     required this.selectedSlot,
@@ -2517,6 +2964,7 @@ class _StripPreview extends StatelessWidget {
   });
 
   final BoothFrameOption frame;
+  final BoothPhotoMode printMode;
   final List<BoothShot> shots;
   final List<int?> assignments;
   final int? selectedSlot;
@@ -2525,32 +2973,20 @@ class _StripPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool horizontal = frame.isHorizontal;
-    final int n = frame.slotCount;
-
-    // Perkiraan ukuran strip agar proporsional.
-    final double maxW = horizontal ? 560 : 260;
-    final double maxH = horizontal ? 230 : (n == 4 ? 580 : 470);
-
-    final List<Widget> slotChildren = <Widget>[];
-    for (int i = 0; i < n; i++) {
-      slotChildren.add(Expanded(child: _buildSlot(context, i)));
-      if (i != n - 1) {
-        slotChildren.add(const SizedBox(width: 8, height: 8));
-      }
-    }
-
-    final Widget inner = horizontal
-        ? Row(children: slotChildren)
-        : Column(children: slotChildren);
+    final Size sheet = _sheetMaxSize(frame, printMode);
 
     return Container(
-      constraints: BoxConstraints(maxWidth: maxW, maxHeight: maxH),
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+      constraints: BoxConstraints(maxWidth: sheet.width, maxHeight: sheet.height),
+      padding: frame.hasBackground
+          ? EdgeInsets.zero
+          : const EdgeInsets.fromLTRB(14, 14, 14, 12),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: frame.borderColor, width: 6),
+        border: frame.hasBackground
+            ? null
+            : Border.all(color: frame.borderColor, width: 6),
         boxShadow: const <BoxShadow>[
           BoxShadow(
             color: Color(0x22000000),
@@ -2561,8 +2997,15 @@ class _StripPreview extends StatelessWidget {
       ),
       child: Column(
         children: <Widget>[
-          Expanded(child: inner),
-          const SizedBox(height: 8),
+          Expanded(
+            child: _buildFrameSheet(
+              frame: frame,
+              mode: printMode,
+              slotBuilder: (int source) => _buildSlot(context, source),
+            ),
+          ),
+          if (!frame.hasBackground) const SizedBox(height: 8),
+          if (!frame.hasBackground)
           Text(
             'The Mystery Photo Booth',
             style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -2743,6 +3186,11 @@ class _FrameChip extends StatelessWidget {
                 borderRadius: BorderRadius.circular(4),
               ),
             ),
+            if (frame.isRemote) ...<Widget>[
+              const SizedBox(width: 6),
+              const Icon(Icons.cloud_done_outlined,
+                  size: 14, color: Color(0xFF7A7266)),
+            ],
             const SizedBox(width: 8),
             Text(
               frame.name,

@@ -1,6 +1,7 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
+import '../models/api_models.dart';
 import '../models/booth_models.dart';
 
 class PhotoBoothConfig extends ChangeNotifier {
@@ -36,6 +37,30 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   BoothFilter filter = BoothFilter.none;
   BoothFrameOption frame = kFrameOptions.first;
+
+  /// Template dari server (`GET /api/templates`). Ditampilkan berdampingan
+  /// dengan frame bawaan Flutter ([kFrameOptions]).
+  List<BoothFrameOption> remoteFrames = const <BoothFrameOption>[];
+
+  /// True selama sinkronisasi template dari server berjalan.
+  bool remoteFramesLoading = false;
+
+  /// Pesan error sinkronisasi terakhir (null bila sukses / belum pernah).
+  String? remoteFramesError;
+
+  /// Background frame bawaan dari dashboard: `frame_key` -> URL gambar.
+  Map<String, FrameBackgroundInfo> frameBackgrounds =
+      const <String, FrameBackgroundInfo>{};
+
+  /// Frame bawaan Flutter lengkap dengan background dari dashboard.
+  List<BoothFrameOption> get defaultFrames => <BoothFrameOption>[
+        for (final BoothFrameOption f in kFrameOptions)
+          f.withBackground(frameBackgrounds[f.id]),
+      ];
+
+  /// Semua frame yang bisa dipilih: bawaan Flutter + template server.
+  List<BoothFrameOption> get allFrames =>
+      <BoothFrameOption>[...defaultFrames, ...remoteFrames];
   double cropScale = 1.0;
   double cropOffsetX = 0.0;
   double cropOffsetY = 0.0;
@@ -166,6 +191,37 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   void setFrame(BoothFrameOption value) {
     frame = value;
+    notifyListeners();
+  }
+
+  void setFrameBackgrounds(Map<String, FrameBackgroundInfo> value) {
+    frameBackgrounds = Map<String, FrameBackgroundInfo>.unmodifiable(value);
+    if (!frame.isRemote) {
+      final int index =
+          kFrameOptions.indexWhere((BoothFrameOption f) => f.id == frame.id);
+      if (index != -1) {
+        frame = kFrameOptions[index].withBackground(frameBackgrounds[frame.id]);
+      }
+    }
+    notifyListeners();
+  }
+
+  void setRemoteFramesLoading(bool value) {
+    remoteFramesLoading = value;
+    notifyListeners();
+  }
+
+  /// Ganti daftar template server. Bila frame aktif adalah template yang
+  /// sudah dihapus di server, kembali ke frame bawaan pertama.
+  void setRemoteFrames(List<BoothFrameOption> value, {String? error}) {
+    remoteFrames = List<BoothFrameOption>.unmodifiable(value);
+    remoteFramesError = error;
+    remoteFramesLoading = false;
+    if (frame.isRemote) {
+      final int index =
+          value.indexWhere((BoothFrameOption f) => f.id == frame.id);
+      frame = index == -1 ? kFrameOptions.first : value[index];
+    }
     notifyListeners();
   }
 

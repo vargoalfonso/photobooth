@@ -6,6 +6,27 @@
 
 import 'dart:convert';
 
+/// Background frame bawaan dari dashboard (`GET /api/frame-backgrounds`).
+/// [aspect] = lebar / tinggi gambar; area* = kotak tempat foto ditempatkan
+/// (persen dari lembar).
+class FrameBackgroundInfo {
+  const FrameBackgroundInfo({
+    required this.url,
+    this.aspect,
+    this.areaX = 4,
+    this.areaY = 3,
+    this.areaW = 92,
+    this.areaH = 94,
+  });
+
+  final String url;
+  final double? aspect;
+  final double areaX;
+  final double areaY;
+  final double areaW;
+  final double areaH;
+}
+
 /// Booth = tempat fisik / device yang memiliki sesi foto.
 class BoothDto {
   const BoothDto({
@@ -45,6 +66,7 @@ class PhotoFrameDto {
     this.printerSetting = 'Primary Printer',
     this.filePath,
     this.thumbnailPath,
+    this.imageUrl,
     this.isActive = true,
     this.layoutJson,
     this.notes,
@@ -59,6 +81,9 @@ class PhotoFrameDto {
   final String printerSetting;
   final String? filePath;
   final String? thumbnailPath;
+
+  /// URL absolut PNG frame (accessor `image_url` di monolith), bila ada.
+  final String? imageUrl;
   final bool isActive;
   final Map<String, dynamic>? layoutJson;
   final String? notes;
@@ -98,6 +123,7 @@ class PhotoFrameDto {
       printerSetting: json['printer_setting']?.toString() ?? 'Primary Printer',
       filePath: json['file_path']?.toString(),
       thumbnailPath: json['thumbnail_path']?.toString(),
+      imageUrl: json['image_url']?.toString(),
       isActive: _asBool(json['is_active'], defaultValue: true),
       layoutJson: layout,
       notes: json['notes']?.toString(),

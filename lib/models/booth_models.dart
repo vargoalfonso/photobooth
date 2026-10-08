@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'api_models.dart';
+
 enum BoothFilter {
   none,
   warm,
@@ -503,6 +505,76 @@ enum BoothApertureSetting {
   }
 }
 
+/// Pengaturan sesi: selalu 8 kali jepret dengan jeda 10 detik antar foto.
+/// Customer memilih foto terbaik dari 8 hasil jepretan untuk mengisi slot frame.
+const int kBoothShotsPerSession = 8;
+const int kBoothShotDelaySeconds = 10;
+
+/// Bentuk susunan slot pada sebuah frame.
+enum BoothFrameLayout {
+  /// Strip tegak lurus (foto bertumpuk dari atas ke bawah).
+  stripVertical,
+
+  /// Strip mendatar (foto berjajar kiri ke kanan).
+  stripHorizontal,
+
+  /// Grid 2 kolom x N baris dengan caption di samping tiap foto (portrait).
+  gridPortrait,
+
+  /// Grid 2 baris x N kolom dengan caption di sisi kiri (landscape).
+  gridLandscape,
+
+  /// Template dari server (`GET /api/templates`): posisi tiap slot memakai
+  /// persentase `x/y/w/h` pada kanvas, dan PNG frame ditumpuk di atasnya.
+  /// Bentuk default-nya memanjang vertikal (strip tegak).
+  template,
+}
+
+/// Cara foto diisikan ke frame.
+enum BoothPhotoMode {
+  /// Setiap slot memakai foto yang berbeda.
+  different,
+
+  /// Foto yang sama dicetak dua kali (strip dicetak 2x, atau separuh grid
+  /// diulang), jadi hanya butuh separuh jumlah foto unik.
+  duplicate,
+}
+
+extension BoothPhotoModeLabel on BoothPhotoMode {
+  String get label => this == BoothPhotoMode.different
+      ? 'Foto Beda-beda'
+      : 'Foto Double';
+
+  String get hint => this == BoothPhotoMode.different
+      ? 'Setiap slot berisi foto yang berbeda.'
+      : 'Foto yang sama dicetak dua kali.';
+}
+
+/// Satu slot foto pada template server. Semua nilai dalam persen (0..100)
+/// dari lebar/tinggi kanvas, sama seperti `layout_json.slots[]` di PHP.
+class BoothSlotRect {
+  const BoothSlotRect({
+    required this.id,
+    required this.label,
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+  });
+
+  final String id;
+  final String label;
+  final double x;
+  final double y;
+  final double w;
+  final double h;
+}
+
+/// Kanvas default template server bila `layout_json.width/height` kosong:
+/// strip vertikal 1 : 3.
+const double kTemplateDefaultWidth = 600;
+const double kTemplateDefaultHeight = 1800;
+
 class BoothFrameOption {
   const BoothFrameOption({
     required this.id,
@@ -511,7 +583,88 @@ class BoothFrameOption {
     required this.borderColor,
     required this.gradient,
     this.slotCount = 4,
+    this.layout = BoothFrameLayout.stripVertical,
+    this.captions = const <String>[],
+    this.remoteId,
+    this.imageUrl,
+    this.canvasWidth = kTemplateDefaultWidth,
+    this.canvasHeight = kTemplateDefaultHeight,
+    this.slots = const <BoothSlotRect>[],
+    this.background,
   });
+
+  /// Bangun frame dari template server ([PhotoFrameDto]).
+  ///
+  /// [hostBaseUrl] adalah host monolith tanpa `/api` (mis.
+  /// `http://192.168.1.10:8000`), dipakai untuk menyusun URL gambar frame.
+  factory BoothFrameOption.fromTemplate(
+    PhotoFrameDto dto, {
+    required String hostBaseUrl,
+  }) {
+    final Map<String, dynamic>? layout = dto.layoutJson;
+
+    double number(Object? v, double fallback) {
+      final double? parsed =
+          v is num ? v.toDouble() : double.tryParse(v?.toString() ?? '');
+      return parsed == null || parsed <= 0 ? fallback : parsed;
+    }
+
+    final double width = number(layout?['width'], kTemplateDefaultWidth);
+    final double height = number(layout?['height'], kTemplateDefaultHeight);
+
+    // Slot lama (grid 0/1 dengan w=h=1) dikonversi seperti di editor PHP.
+    final Object? rawSlots = layout?['slots'];
+    final List<Map<String, dynamic>> rawList = rawSlots is List
+        ? rawSlots.whereType<Map<String, dynamic>>().toList(growable: false)
+        : const <Map<String, dynamic>>[];
+    final bool legacyGrid = rawList.isNotEmpty &&
+        rawList.every((Map<String, dynamic> s) =>
+            number(s['w'], 0) <= 1 && number(s['h'], 0) <= 1);
+
+    final List<BoothSlotRect> slots = <BoothSlotRect>[];
+    for (int i = 0; i < rawList.length; i++) {
+      final Map<String, dynamic> s = rawList[i];
+      final double x = legacyGrid
+          ? number(s['x'], 0) * 50 + 5
+          : (s['x'] is num ? (s['x'] as num).toDouble() : 10.0);
+      final double y = legacyGrid
+          ? number(s['y'], 0) * 50 + 5
+          : (s['y'] is num ? (s['y'] as num).toDouble() : 10.0);
+      slots.add(BoothSlotRect(
+        id: s['id']?.toString() ?? 'slot-$i',
+        label: s['label']?.toString() ?? 'Foto ${i + 1}',
+        x: x.clamp(0.0, 100.0).toDouble(),
+        y: y.clamp(0.0, 100.0).toDouble(),
+        w: (legacyGrid ? 40.0 : number(s['w'], 35)).clamp(1.0, 100.0).toDouble(),
+        h: (legacyGrid ? 40.0 : number(s['h'], 35)).clamp(1.0, 100.0).toDouble(),
+      ));
+    }
+
+    const List<Color> accents = <Color>[
+      Color(0xFFD9CDB7),
+      Color(0xFFC9B79C),
+      Color(0xFFB6C2D9),
+      Color(0xFFD8B08A),
+    ];
+    final Color accent = accents[dto.id % accents.length];
+
+    return BoothFrameOption(
+      id: 'api-${dto.id}',
+      name: dto.name,
+      description:
+          'Template server, strip vertikal dengan ${slots.length} slot foto.',
+      borderColor: accent,
+      gradient: <Color>[accent.withValues(alpha: 0.2), const Color(0x11FFFFFF)],
+      slotCount: slots.length,
+      layout: BoothFrameLayout.template,
+      captions: <String>[for (final BoothSlotRect s in slots) s.label],
+      remoteId: dto.id,
+      imageUrl: _resolveFrameUrl(dto, hostBaseUrl),
+      canvasWidth: width,
+      canvasHeight: height,
+      slots: slots,
+    );
+  }
 
   final String id;
   final String name;
@@ -519,44 +672,253 @@ class BoothFrameOption {
   final Color borderColor;
   final List<Color> gradient;
 
-  /// Jumlah slot foto pada frame ini. Saat ini hanya 3 atau 4.
+  /// Jumlah slot foto yang tercetak pada frame ini (3, 4, 6, atau 8).
   final int slotCount;
 
-  /// Frame horizontal (strip mendatar). Selain ini dianggap vertikal.
-  bool get isHorizontal => id == 'minimal-slate';
+  final BoothFrameLayout layout;
+
+  /// Caption per foto (opsional), mis. "The Main Character".
+  final List<String> captions;
+
+  // --- khusus template dari server ---
+  /// ID `photo_frames.id` di monolith. Null = frame bawaan Flutter.
+  final int? remoteId;
+
+  /// URL PNG frame (overlay) di server.
+  final String? imageUrl;
+
+  /// Ukuran kanvas asli template (piksel), menentukan rasio lembar.
+  final double canvasWidth;
+  final double canvasHeight;
+
+  /// Posisi tiap slot (persen) untuk layout [BoothFrameLayout.template].
+  final List<BoothSlotRect> slots;
+
+  /// Background lembar frame dari dashboard (`/api/frame-backgrounds`):
+  /// gambar penuh (logo, tulisan, hiasan) + area tempat foto ditempatkan.
+  /// Null = lembar putih biasa.
+  final FrameBackgroundInfo? background;
+
+  String? get backgroundUrl => background?.url;
+
+  bool get hasBackground => (background?.url ?? '').isNotEmpty;
+
+  /// Rasio lebar : tinggi SATU lembar bila memakai background.
+  double get backgroundAspect {
+    final double? a = background?.aspect;
+    return (a != null && a > 0) ? a : 2 / 3;
+  }
+
+  /// Salinan frame ini dengan background baru (atau tanpa background).
+  BoothFrameOption withBackground(FrameBackgroundInfo? info) {
+    if (info == null && background == null) return this;
+    return BoothFrameOption(
+      id: id,
+      name: name,
+      description: description,
+      borderColor: borderColor,
+      gradient: gradient,
+      slotCount: slotCount,
+      layout: layout,
+      captions: captions,
+      remoteId: remoteId,
+      imageUrl: imageUrl,
+      canvasWidth: canvasWidth,
+      canvasHeight: canvasHeight,
+      slots: slots,
+      background: info,
+    );
+  }
+
+  /// Frame ini berasal dari `/api/templates`.
+  bool get isRemote => remoteId != null;
+
+  bool get isTemplate => layout == BoothFrameLayout.template;
+
+  /// Rasio lebar : tinggi kanvas template.
+  double get canvasAspect => canvasWidth / canvasHeight;
+
+  /// Rasio kartu pratinjau pada daftar pilihan frame.
+  double get previewAspect {
+    if (hasBackground) return backgroundAspect.clamp(0.25, 3.0).toDouble();
+    if (isTemplate) return canvasAspect.clamp(0.25, 2.5).toDouble();
+    return isLandscape ? 1.35 : 0.78;
+  }
+
+  /// Frame horizontal (strip mendatar).
+  bool get isHorizontal => layout == BoothFrameLayout.stripHorizontal;
+
+  bool get isGrid =>
+      layout == BoothFrameLayout.gridPortrait ||
+      layout == BoothFrameLayout.gridLandscape;
+
+  /// Lembar bentuk mendatar (lebar > tinggi).
+  bool get isLandscape =>
+      layout == BoothFrameLayout.stripHorizontal ||
+      layout == BoothFrameLayout.gridLandscape ||
+      (isTemplate && canvasWidth > canvasHeight);
+
+  /// Jumlah foto unik yang harus dipilih customer.
+  /// Grid mode double: separuh slot mengulang separuh lainnya.
+  /// Strip mode double: strip yang sama dicetak 2x (foto unik tetap sama).
+  int uniqueSlotCount(BoothPhotoMode mode) =>
+      isGrid && mode == BoothPhotoMode.duplicate ? slotCount ~/ 2 : slotCount;
+
+  /// Berapa kali strip digandakan pada lembar cetak (hanya untuk strip).
+  int stripCopies(BoothPhotoMode mode) =>
+      !isGrid && mode == BoothPhotoMode.duplicate ? 2 : 1;
+
+  /// Untuk tiap sel tercetak (urut baris demi baris), index slot unik
+  /// yang mengisinya.
+  List<int> cellSources(BoothPhotoMode mode) {
+    final bool dup = mode == BoothPhotoMode.duplicate;
+    switch (layout) {
+      case BoothFrameLayout.gridPortrait:
+        // 2 kolom: sel kiri & kanan dalam satu baris memakai foto yang sama.
+        return List<int>.generate(slotCount, (int i) => dup ? i ~/ 2 : i);
+      case BoothFrameLayout.gridLandscape:
+        // Baris kedua mengulang baris pertama.
+        final int cols = slotCount ~/ 2;
+        return List<int>.generate(slotCount, (int i) => dup ? i % cols : i);
+      case BoothFrameLayout.stripVertical:
+      case BoothFrameLayout.stripHorizontal:
+      case BoothFrameLayout.template:
+        return List<int>.generate(slotCount, (int i) => i);
+    }
+  }
+
+  String captionFor(int source) =>
+      source >= 0 && source < captions.length ? captions[source] : '';
 }
 
 const List<BoothFrameOption> kFrameOptions = <BoothFrameOption>[
   BoothFrameOption(
-    id: 'classic-gold',
-    name: 'Classic Gold',
-    description: 'Border emas elegan seperti brand booth premium.',
-    borderColor: Color(0xFFF1C24C),
-    gradient: <Color>[Color(0x66F1C24C), Color(0x11FFFFFF)],
-    slotCount: 4,
+    id: 'main-character',
+    name: 'Main Character 3x2',
+    description: 'Grid 3 baris x 2 kolom dengan caption di samping tiap foto (6 slot).',
+    borderColor: Color(0xFFD9CDB7),
+    gradient: <Color>[Color(0x33D9CDB7), Color(0x11FFFFFF)],
+    slotCount: 6,
+    layout: BoothFrameLayout.gridPortrait,
+    captions: <String>[
+      'The Main Character',
+      'The Ride or Die',
+      'The Trendsetter',
+      'The Chaos',
+      'The Savage',
+      'The Realist',
+    ],
   ),
   BoothFrameOption(
-    id: 'neon-night',
-    name: 'Neon Night',
-    description: 'Aksen neon untuk event malam dan konser.',
-    borderColor: Color(0xFF44E0FF),
-    gradient: <Color>[Color(0x3344E0FF), Color(0x117D5CFF)],
-    slotCount: 4,
+    id: 'main-character-4',
+    name: 'Main Character 4x2',
+    description: 'Grid 4 baris x 2 kolom dengan caption di samping tiap foto (8 slot).',
+    borderColor: Color(0xFFD9CDB7),
+    gradient: <Color>[Color(0x33D9CDB7), Color(0x11FFFFFF)],
+    slotCount: 8,
+    layout: BoothFrameLayout.gridPortrait,
+    captions: <String>[
+      'The Main Character',
+      'The Ride or Die',
+      'The Trendsetter',
+      'The Chaos',
+      'The Savage',
+      'The Realist',
+      'The Dreamer',
+      'The Wildcard',
+    ],
   ),
   BoothFrameOption(
-    id: 'rose-party',
-    name: 'Rose Party',
-    description: 'Nuansa soft pink untuk wedding dan bridal booth.',
-    borderColor: Color(0xFFFF8FB1),
-    gradient: <Color>[Color(0x44FF8FB1), Color(0x11FFF3F7)],
+    id: 'spotlight',
+    name: 'Spotlight 3x2',
+    description: 'Landscape 2 baris x 3 kolom dengan caption di sisi kiri (6 slot).',
+    borderColor: Color(0xFFC9B79C),
+    gradient: <Color>[Color(0x33C9B79C), Color(0x11FFFFFF)],
+    slotCount: 6,
+    layout: BoothFrameLayout.gridLandscape,
+    captions: <String>[
+      'The Spotlight',
+      'The Photogenic',
+      'The Best Dressed',
+      'The One',
+      'The Charismatic',
+      'The Head Turner',
+    ],
+  ),
+  BoothFrameOption(
+    id: 'spotlight-4',
+    name: 'Spotlight 4x2',
+    description: 'Landscape 2 baris x 4 kolom dengan caption di sisi kiri (8 slot).',
+    borderColor: Color(0xFFC9B79C),
+    gradient: <Color>[Color(0x33C9B79C), Color(0x11FFFFFF)],
+    slotCount: 8,
+    layout: BoothFrameLayout.gridLandscape,
+    captions: <String>[
+      'The Spotlight',
+      'The Photogenic',
+      'The Best Dressed',
+      'The One',
+      'The Charismatic',
+      'The Head Turner',
+      'The Icon',
+      'The Showstopper',
+    ],
+  ),
+  BoothFrameOption(
+    id: 'straight-3',
+    name: 'Lurus 3 Foto',
+    description: 'Strip tegak lurus berisi 3 foto.',
+    borderColor: Color(0xFFD9CDB7),
+    gradient: <Color>[Color(0x33D9CDB7), Color(0x11FFFFFF)],
     slotCount: 3,
+  ),
+  BoothFrameOption(
+    id: 'straight-4',
+    name: 'Lurus 4 Foto',
+    description: 'Strip tegak lurus berisi 4 foto.',
+    borderColor: Color(0xFFC9B79C),
+    gradient: <Color>[Color(0x33C9B79C), Color(0x11FFFFFF)],
+    slotCount: 4,
+  ),
+  BoothFrameOption(
+    id: 'row-3',
+    name: 'Sebaris 3 Foto',
+    description: 'Satu baris mendatar berisi 3 foto.',
+    borderColor: Color(0xFFD9CDB7),
+    gradient: <Color>[Color(0x33D9CDB7), Color(0x11FFFFFF)],
+    slotCount: 3,
+    layout: BoothFrameLayout.stripHorizontal,
   ),
   BoothFrameOption(
     id: 'minimal-slate',
     name: 'Minimal Slate',
-    description: 'Frame tipis modern untuk corporate activation.',
+    description: 'Satu baris mendatar berisi 4 foto, gaya tipis modern.',
     borderColor: Color(0xFFB6C2D9),
     gradient: <Color>[Color(0x223D5877), Color(0x11000000)],
-    slotCount: 3,
+    slotCount: 4,
+    layout: BoothFrameLayout.stripHorizontal,
   ),
 ];
+
+/// Susun URL absolut PNG frame. Pakai `image_url` dari server bila ada,
+/// kalau tidak, bentuk dari `file_path` (disk `public` -> `/storage/...`).
+String? _resolveFrameUrl(PhotoFrameDto dto, String hostBaseUrl) {
+  final RegExp trailingSlashes = RegExp(r'/+$');
+  final RegExp leadingSlashes = RegExp(r'^/+');
+  final String host = hostBaseUrl.replaceAll(trailingSlashes, '');
+
+  final String? direct = dto.imageUrl;
+  if (direct != null && direct.isNotEmpty) {
+    if (direct.startsWith('http://') || direct.startsWith('https://')) {
+      return direct;
+    }
+    final String rel = direct.replaceAll(leadingSlashes, '');
+    return '$host/$rel';
+  }
+
+  final String? path = dto.filePath;
+  if (path == null || path.isEmpty) return null;
+  final String cleaned =
+      path.replaceAll(leadingSlashes, '').replaceFirst('storage/', '');
+  return '$host/storage/$cleaned';
+}
