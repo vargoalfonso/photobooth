@@ -46,6 +46,18 @@ class PhotoboothApiService {
     }
   }
 
+  // ---------------------------------------------------------------- Config
+
+  /// GET /api/config — pengaturan server yang harus diikuti kiosk.
+  /// Server lama tanpa endpoint ini membalas 404; caller boleh mengabaikannya.
+  Future<ServerConfigDto> getServerConfig() async {
+    final Map<String, dynamic> raw = await _client.getJson('config');
+    final Object? data = raw['data'];
+    return ServerConfigDto.fromJson(
+      data is Map<String, dynamic> ? data : raw,
+    );
+  }
+
   // ---------------------------------------------------------------- Frames
 
   /// GET /api/templates?category=... — daftar frame aktif.
@@ -135,6 +147,13 @@ class PhotoboothApiService {
     }
     config.setRemoteFramesLoading(true);
     try {
+      // Server = sumber kebenaran untuk "wajib bayar". Gagal/404 -> pakai
+      // nilai lokal.
+      try {
+        final ServerConfigDto serverConfig = await svc.getServerConfig();
+        config.applyServerConfig(requirePayment: serverConfig.requirePayment);
+      } catch (_) {}
+
       try {
         config.setRemoteFrames(await svc.listRemoteFrames());
       } on ApiException catch (e) {

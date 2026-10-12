@@ -25,6 +25,10 @@ class PhotoBoothConfig extends ChangeNotifier {
   /// (diverifikasi ke dashboard).
   bool requirePayment = true;
 
+  /// True bila nilai [requirePayment] berasal dari server (`GET /api/config`).
+  /// Saat true, switch di halaman API dikunci supaya tidak beda dengan server.
+  bool requirePaymentFromServer = false;
+
   // ----------------------------------------------------- Canon EOS R100
   /// Saat true, live view dan hasil foto diambil dari Canon EOS R100
   /// (bukan webcam/kamera perangkat).
@@ -824,6 +828,17 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   void setRequirePayment(bool value) {
     requirePayment = value;
+    notifyListeners();
+  }
+
+  /// Ikuti pengaturan server (sumber kebenaran). Dipanggil setelah
+  /// `GET /api/config` berhasil.
+  void applyServerConfig({required bool requirePayment}) {
+    if (this.requirePayment == requirePayment && requirePaymentFromServer) {
+      return;
+    }
+    this.requirePayment = requirePayment;
+    requirePaymentFromServer = true;
     notifyListeners();
   }
 

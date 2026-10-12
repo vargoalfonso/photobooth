@@ -27,6 +27,32 @@ class FrameBackgroundInfo {
   final double areaH;
 }
 
+/// Pengaturan server (`GET /api/config`).
+class ServerConfigDto {
+  const ServerConfigDto({
+    required this.requirePayment,
+    this.shotsPerSession,
+    this.warnings = const <String>[],
+  });
+
+  final bool requirePayment;
+  final int? shotsPerSession;
+
+  /// Masalah setup server (storage link, migrasi, mail, printer).
+  final List<String> warnings;
+
+  factory ServerConfigDto.fromJson(Map<String, dynamic> json) {
+    final Object? rawWarnings = json['warnings'];
+    return ServerConfigDto(
+      requirePayment: _asBool(json['require_payment'], defaultValue: true),
+      shotsPerSession: (json['shots_per_session'] as num?)?.toInt(),
+      warnings: rawWarnings is List
+          ? rawWarnings.map((Object? w) => w.toString()).toList(growable: false)
+          : const <String>[],
+    );
+  }
+}
+
 /// Booth = tempat fisik / device yang memiliki sesi foto.
 class BoothDto {
   const BoothDto({

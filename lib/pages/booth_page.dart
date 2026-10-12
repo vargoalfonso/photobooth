@@ -789,8 +789,12 @@ class _BoothPageState extends State<BoothPage> {
       // 1) Tentukan template di server. Frame yang dipilih dari /api/templates
       //    sudah membawa id-nya; frame bawaan Flutter dicocokkan berdasarkan
       //    jumlah slot seperti sebelumnya.
+      //    Sesi berbayar tidak membutuhkan template server: sesinya sudah ada
+      //    dan frame bawaan Flutter dicatat lewat `layout`. Jadi jangan menebak
+      //    template (bisa salah) dan jangan gagal setelah pelanggan bayar.
+      final PaidSession? paid = _paid;
       int? frameId = _activeFrame.remoteId;
-      if (frameId == null) {
+      if (frameId == null && paid == null) {
         final List<PhotoFrameDto> templates = await svc.listTemplates();
         PhotoFrameDto? match;
         final int photoCount = _shots.length;
@@ -804,7 +808,7 @@ class _BoothPageState extends State<BoothPage> {
         frameId = match?.id;
       }
 
-      if (frameId == null) {
+      if (frameId == null && paid == null) {
         _showSnack(
           'Tidak ada template aktif di server. Buat dulu di dashboard monolith.',
         );
@@ -852,7 +856,6 @@ class _BoothPageState extends State<BoothPage> {
       //      (POST /photo-sessions/{id}/photos + PUT metadata). Server menolak
       //      sesi yang belum paid dan membatasi jumlah foto sesuai paket.
       //    - Tanpa pembayaran (mode lama): POST /api/photo-sessions.
-      final PaidSession? paid = _paid;
       final PhotoSessionDto session;
       if (paid != null) {
         if (!_paidPhotosSent) {
@@ -869,7 +872,7 @@ class _BoothPageState extends State<BoothPage> {
       } else {
         session = await svc.createSession(
           boothId: widget.config.apiBoothId,
-          photoFrameId: frameId,
+          photoFrameId: frameId!,
           photos: uploads,
           filter: filterToApiString(_activeFilter),
           layout: _activeFrame.id,
