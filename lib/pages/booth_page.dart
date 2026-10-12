@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -123,6 +123,43 @@ class _BoothPageState extends State<BoothPage> {
       if (f.id == frame.id) return f;
     }
     return frame;
+  }
+
+  // --- desain background (dipilih customer sebelum memilih filter) ---
+  /// Background yang dipilih customer (lihat [_designKeyOf]). Null = default,
+  /// yaitu tampilan frame bawaan tanpa gambar background.
+  String? _designKey;
+
+  static String _designKeyOf(FrameBackgroundInfo d) =>
+      d.id != null ? 'id:${d.id}' : 'url:${d.url}';
+
+  /// Desain background frame aktif. Template server tidak punya desain.
+  List<FrameBackgroundInfo> get _designs => _activeFrame.isRemote
+      ? const <FrameBackgroundInfo>[]
+      : widget.config.backgroundsFor(_activeFrame.id);
+
+  /// Langkah "Pilih Background" muncul bila dashboard punya background aktif.
+  bool get _hasDesignChoice => _designs.isNotEmpty;
+
+  /// Background yang sedang dipakai; null = default (tanpa gambar).
+  FrameBackgroundInfo? get _selectedDesign {
+    final String? key = _designKey;
+    if (key == null) return null;
+    for (final FrameBackgroundInfo d in _designs) {
+      if (_designKeyOf(d) == key) return d;
+    }
+    return null;
+  }
+
+  /// Frame aktif lengkap dengan desain pilihan customer.
+  BoothFrameOption _styledFrame() {
+    final BoothFrameOption base = _fresh(_activeFrame);
+    if (base.isRemote) return base;
+    return base.withBackground(_selectedDesign);
+  }
+
+  void _resetDesign() {
+    _designKey = null;
   }
 
   // --- state compose (frame mockup + slot assignment) ---
@@ -398,6 +435,10 @@ class _BoothPageState extends State<BoothPage> {
       return _buildComposeScreen(context);
     }
 
+    if (_stage == _BoothStage.background) {
+      return _buildBackgroundScreen(context);
+    }
+
     if (_stage == _BoothStage.filterSelect) {
       return _buildFilterSlideScreen(context);
     }
@@ -433,13 +474,7 @@ class _BoothPageState extends State<BoothPage> {
         height: double.infinity,
       );
 
-      final List<double>? matrix = widget.config.filter.matrix;
-      if (matrix != null) {
-        image = ColorFiltered(
-          colorFilter: ColorFilter.matrix(matrix),
-          child: image,
-        );
-      }
+      image = applyBoothFilter(image, widget.config.filter);
 
       return Transform(
         alignment: Alignment.center,
@@ -518,6 +553,7 @@ class _BoothPageState extends State<BoothPage> {
       _sessionRunning = false;
       _activeFrame = widget.config.frame;
       _activeFilter = widget.config.filter;
+      _resetDesign();
       _initSlotsForFrame(_activeFrame);
       _stage = _BoothStage.compose;
     });
@@ -665,27 +701,6 @@ class _BoothPageState extends State<BoothPage> {
     return index == -1 ? null : index;
   }
 
-  /// Pindah ke frame lain di layar compose. Berusaha mempertahankan urutan
-  /// assignment sebelumnya; kelebihan slot dipotong, slot tambahan kosong.
-  void _switchComposeFrame(BoothFrameOption frame) {
-    final List<int?> previous = List<int?>.from(_slotAssignments);
-    final int count = frame.uniqueSlotCount(_printMode);
-    final List<int?> next = List<int?>.filled(count, null);
-
-    // Salin assignment lama sebanyak mungkin.
-    final int copy = count < previous.length ? count : previous.length;
-    for (int i = 0; i < copy; i++) {
-      next[i] = previous[i];
-    }
-
-    // Slot tambahan dibiarkan kosong; customer mengisinya dari tray.
-    setState(() {
-      _activeFrame = frame;
-      _slotAssignments = next;
-      _selectedSlot = _firstEmptySlot();
-    });
-  }
-
   /// Ganti mode foto beda-beda <-> double di layar compose. Pilihan foto
   /// yang sudah ada dipertahankan sebanyak mungkin.
   void _switchPrintMode(BoothPhotoMode mode) {
@@ -754,6 +769,7 @@ class _BoothPageState extends State<BoothPage> {
       _selectedSlot = null;
       _activeFrame = widget.config.frame;
       _activeFilter = widget.config.filter;
+      _resetDesign();
       _captureError = null;
       _sessionRunning = false;
       _uploading = false;
@@ -1251,23 +1267,6 @@ class _BoothPageState extends State<BoothPage> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                SizedBox(
-                  height: 44,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: widget.config.allFrames.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 10),
-                    itemBuilder: (BuildContext ctx, int i) {
-                      final BoothFrameOption f = widget.config.allFrames[i];
-                      return _FrameChip(
-                        frame: f,
-                        selected: f.id == _activeFrame.id,
-                        onTap: () => _switchComposeFrame(f),
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 10),
                 Wrap(
                   spacing: 10,
                   children: <Widget>[
@@ -1283,12 +1282,11 @@ class _BoothPageState extends State<BoothPage> {
                 Expanded(
                   child: Center(
                     child: _StripPreview(
-                      frame: _fresh(_activeFrame),
+                      frame: _styledFrame(),
                       printMode: _printMode,
                       shots: _shots,
                       assignments: _slotAssignments,
                       selectedSlot: _selectedSlot,
-                      filterMatrix: null,
                       onSlotTap: _handleSlotTap,
                     ),
                   ),
@@ -1360,12 +1358,17 @@ class _BoothPageState extends State<BoothPage> {
                       child: GradientButton(
                         expand: true,
                         label: allFilled
-                            ? 'Lanjut ke Filter'
+                            ? (_hasDesignChoice
+                                ? 'Pilih Background'
+                                : 'Lanjut ke Filter')
                             : 'Isi semua slot dulu',
-                        icon: Icons.auto_fix_high,
+                        icon: _hasDesignChoice
+                            ? Icons.palette_outlined
+                            : Icons.auto_fix_high,
                         onPressed: allFilled
-                            ? () => setState(
-                                () => _stage = _BoothStage.filterSelect)
+                            ? () => setState(() => _stage = _hasDesignChoice
+                                ? _BoothStage.background
+                                : _BoothStage.filterSelect)
                             : null,
                       ),
                     ),
@@ -1377,6 +1380,128 @@ class _BoothPageState extends State<BoothPage> {
         ),
       ),
     );
+  }
+
+  // ------------------------------------------------- layar pemilihan desain
+  Widget _buildBackgroundScreen(BuildContext context) {
+    final List<FrameBackgroundInfo> designs = _designs;
+    final FrameBackgroundInfo? selected = _selectedDesign;
+
+    return Scaffold(
+      body: AppBackground(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                SectionHeader(
+                  title: 'Pilih Background',
+                  subtitle:
+                      'Pilih gambar background untuk frame kamu. Foto tetap sama, hanya backgroundnya yang berubah.',
+                  trailing: StatusBadge(
+                    label: selected?.name ?? 'Default',
+                    color: _activeFrame.borderColor,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Expanded(
+                  child: Center(
+                    child: _StripPreview(
+                      frame: _styledFrame(),
+                      printMode: _printMode,
+                      shots: _shots,
+                      assignments: _slotAssignments,
+                      selectedSlot: null,
+                      onSlotTap: null,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 150,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: designs.length + 1,
+                    separatorBuilder: (_, __) => const SizedBox(width: 12),
+                    itemBuilder: (BuildContext ctx, int i) {
+                      if (i == 0) {
+                        return _DesignCard(
+                          label: 'Default',
+                          accent: _activeFrame.borderColor,
+                          selected: selected == null,
+                          onTap: () => setState(() => _designKey = null),
+                        );
+                      }
+                      final FrameBackgroundInfo d = designs[i - 1];
+                      return _DesignCard(
+                        label: d.name,
+                        info: d,
+                        accent: _activeFrame.borderColor,
+                        selected: identical(d, selected),
+                        onTap: () =>
+                            setState(() => _designKey = _designKeyOf(d)),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () =>
+                            setState(() => _stage = _BoothStage.compose),
+                        icon: const Icon(Icons.arrow_back),
+                        label: const Text('Kembali Compose'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: GradientButton(
+                        expand: true,
+                        label: 'Lanjut ke Filter',
+                        icon: Icons.auto_fix_high,
+                        onPressed: () => setState(
+                            () => _stage = _BoothStage.filterSelect),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Foto contoh untuk kartu filter: foto pertama yang sudah ditaruh di slot
+  /// (atau jepretan pertama). Di-decode kecil supaya 26 kartu tetap ringan.
+  Widget? _filterSample() {
+    BoothShot? shot;
+    for (final int? a in _slotAssignments) {
+      if (a != null && a < _shots.length) {
+        shot = _shots[a];
+        break;
+      }
+    }
+    shot ??= _shots.isEmpty ? null : _shots.first;
+    if (shot == null) return null;
+
+    if (shot.bytes != null) {
+      return Image.memory(shot.bytes!,
+          fit: BoxFit.cover, cacheWidth: 240, gaplessPlayback: true);
+    }
+    if (!kIsWeb && shot.filePath != null) {
+      return Image.file(File(shot.filePath!),
+          fit: BoxFit.cover,
+          cacheWidth: 240,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => const ColoredBox(color: Colors.black26));
+    }
+    return null;
   }
 
   // -------------------------------------------------- layar pemilihan filter
@@ -1402,19 +1527,19 @@ class _BoothPageState extends State<BoothPage> {
                 Expanded(
                   child: Center(
                     child: _StripPreview(
-                      frame: _fresh(_activeFrame),
+                      frame: _styledFrame(),
                       printMode: _printMode,
                       shots: _shots,
                       assignments: _slotAssignments,
                       selectedSlot: null,
-                      filterMatrix: _activeFilter.matrix,
+                      filter: _activeFilter,
                       onSlotTap: null,
                     ),
                   ),
                 ),
                 const SizedBox(height: 16),
                 SizedBox(
-                  height: 130,
+                  height: 124,
                   child: ListView.separated(
                     scrollDirection: Axis.horizontal,
                     itemCount: BoothFilter.values.length,
@@ -1424,6 +1549,7 @@ class _BoothPageState extends State<BoothPage> {
                       return _FilterCard(
                         filter: f,
                         selected: f == _activeFilter,
+                        sample: _filterSample(),
                         onTap: () => setState(() => _activeFilter = f),
                       );
                     },
@@ -1434,10 +1560,14 @@ class _BoothPageState extends State<BoothPage> {
                   children: <Widget>[
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: () => setState(
-                            () => _stage = _BoothStage.compose),
+                        onPressed: () => setState(() => _stage =
+                            _hasDesignChoice
+                                ? _BoothStage.background
+                                : _BoothStage.compose),
                         icon: const Icon(Icons.arrow_back),
-                        label: const Text('Kembali Compose'),
+                        label: Text(_hasDesignChoice
+                            ? 'Kembali ke Background'
+                            : 'Kembali Compose'),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1512,7 +1642,7 @@ class _BoothPageState extends State<BoothPage> {
                             return _ShotCard(
                               shot: _shots[index],
                               index: index,
-                              filterMatrix: widget.config.filter.matrix,
+                              filter: widget.config.filter,
                               frame: widget.config.frame,
                               onRetake: widget.config.enableRetakeButton
                                   ? () => _retakeShot(index)
@@ -2109,13 +2239,7 @@ class _BoothPageState extends State<BoothPage> {
 
   Widget _buildPreview(CameraController controller) {
     Widget preview = CameraPreview(controller);
-    final List<double>? matrix = widget.config.filter.matrix;
-    if (matrix != null) {
-      preview = ColorFiltered(
-        colorFilter: ColorFilter.matrix(matrix),
-        child: preview,
-      );
-    }
+    preview = applyBoothFilter(preview, widget.config.filter);
 
     // cover: gambar kamera memenuhi seluruh bingkai (tanpa pita kosong di
     // sisi). Bagian yang berlebih terpotong oleh ClipRRect pembungkusnya.
@@ -2159,6 +2283,7 @@ enum _BoothStage {
   frameSelection,
   preview,
   compose,
+  background,
   filterSelect,
   result,
 }
@@ -2168,14 +2293,14 @@ class _ShotCard extends StatelessWidget {
   const _ShotCard({
     required this.shot,
     required this.index,
-    required this.filterMatrix,
+    required this.filter,
     required this.frame,
     this.onRetake,
   });
 
   final BoothShot shot;
   final int index;
-  final List<double>? filterMatrix;
+  final BoothFilter filter;
   final BoothFrameOption frame;
   final VoidCallback? onRetake;
 
@@ -2200,12 +2325,7 @@ class _ShotCard extends StatelessWidget {
       image = const ColoredBox(color: Colors.black26);
     }
 
-    if (filterMatrix != null) {
-      image = ColorFiltered(
-        colorFilter: ColorFilter.matrix(filterMatrix!),
-        child: image,
-      );
-    }
+    image = applyBoothFilter(image, filter);
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(AppTheme.radiusLg),
@@ -2395,15 +2515,20 @@ List<Widget> _withGaps(List<Widget> items, double gap) {
 }
 
 /// Ukuran maksimum lembar frame (strip / grid) pada layar.
+/// Rasio lebar : tinggi SELURUH lembar ber-background. Strip double = dua
+/// lembar berdampingan bila desain portrait, bertumpuk bila landscape.
+double _backgroundSheetAspect(BoothFrameOption frame, BoothPhotoMode mode) {
+  final double one = frame.backgroundAspect;
+  final int copies = frame.stripCopies(mode);
+  if (copies == 1) return one;
+  return one > 1 ? one / copies : one * copies;
+}
+
 Size _sheetMaxSize(BoothFrameOption frame, BoothPhotoMode mode) {
   final bool doubled = frame.stripCopies(mode) == 2;
   if (frame.hasBackground) {
-    // Lebar mengikuti rasio gambar; strip double = dua lembar berdampingan
-    // (vertikal) atau bertumpuk (horizontal).
-    final double one = frame.backgroundAspect;
-    final double total = !doubled
-        ? one
-        : (frame.isHorizontal ? one / 2 : one * 2);
+    // Lebar mengikuti rasio gambar (lihat [_backgroundSheetAspect]).
+    final double total = _backgroundSheetAspect(frame, mode);
     return Size((560 * total).clamp(160.0, 760.0).toDouble(), 600);
   }
   switch (frame.layout) {
@@ -2437,20 +2562,29 @@ Widget _buildFrameSheet({
   required BoothFrameOption frame,
   required BoothPhotoMode mode,
   required Widget Function(int source) slotBuilder,
-  bool showCaptions = true,
   double gap = 8,
   bool single = false,
 }) {
   // Frame ber-background: gambar penuh jadi dasar lembar, foto hanya di area
   // yang diatur dari dashboard. Strip double = dua lembar yang sama.
   if (!single && frame.hasBackground && !frame.isTemplate) {
+    // Susunan foto mengikuti BENTUK AREA foto pada desain: area portrait ->
+    // foto tersusun tegak, area landscape -> mendatar. Dengan begitu satu
+    // desain ("Semua Frame") cocok untuk semua frame, mis. "Spotlight 4x2"
+    // di desain portrait tampil sebagai 2 kolom x 4 baris.
+    final FrameBackgroundInfo info = frame.background!;
+    final bool areaLandscape = info.areaH > 0 &&
+        (info.areaW / info.areaH) * frame.backgroundAspect > 1;
+    final BoothFrameOption inner = frame.isLandscape == areaLandscape
+        ? frame
+        : frame.withLayout(frame.layout.transposed);
+
     Widget one() => _BackgroundSheet(
           frame: frame,
           child: _buildFrameSheet(
-            frame: frame,
+            frame: inner,
             mode: mode,
             slotBuilder: slotBuilder,
-            showCaptions: showCaptions,
             gap: gap,
             single: true,
           ),
@@ -2460,20 +2594,14 @@ Widget _buildFrameSheet({
       Expanded(child: one()),
       Expanded(child: one()),
     ];
-    return frame.isHorizontal
+    // Lembar landscape bertumpuk, lembar portrait berdampingan.
+    return frame.backgroundAspect > 1
         ? Column(children: _withGaps(copies, gap))
         : Row(children: _withGaps(copies, gap));
   }
 
   final List<int> src = frame.cellSources(mode);
   Widget cell(int c) => slotBuilder(src[c]);
-
-  const TextStyle captionStyle = TextStyle(
-    color: Color(0xFF656565),
-    fontSize: 9,
-    fontWeight: FontWeight.w600,
-    height: 1.15,
-  );
 
   switch (frame.layout) {
     case BoothFrameLayout.stripVertical:
@@ -2528,35 +2656,14 @@ Widget _buildFrameSheet({
     case BoothFrameLayout.gridPortrait:
       {
         final int rows = frame.slotCount ~/ 2;
-        Widget captioned(int c) {
-          final String caption = frame.captionFor(src[c]);
-          return Row(
-            children: <Widget>[
-              Expanded(child: cell(c)),
-              if (showCaptions && caption.isNotEmpty) ...<Widget>[
-                const SizedBox(width: 4),
-                SizedBox(
-                  width: 46,
-                  child: Text(
-                    caption,
-                    style: captionStyle,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ],
-          );
-        }
-
         return Column(
           children: _withGaps(<Widget>[
             for (int r = 0; r < rows; r++)
               Expanded(
                 child: Row(
                   children: _withGaps(<Widget>[
-                    Expanded(child: captioned(r * 2)),
-                    Expanded(child: captioned(r * 2 + 1)),
+                    Expanded(child: cell(r * 2)),
+                    Expanded(child: cell(r * 2 + 1)),
                   ], gap + 4),
                 ),
               ),
@@ -2566,39 +2673,15 @@ Widget _buildFrameSheet({
     case BoothFrameLayout.gridLandscape:
       {
         final int cols = frame.slotCount ~/ 2;
-        String rowCaption(int r) => <String>[
-              for (int c = 0; c < cols; c++) frame.captionFor(src[r * cols + c]),
-            ].where((String t) => t.isNotEmpty).join('\n');
-
         return Column(
           children: _withGaps(<Widget>[
             for (int r = 0; r < 2; r++)
               Expanded(
                 child: Row(
-                  children: <Widget>[
-                    if (showCaptions) ...<Widget>[
-                      SizedBox(
-                        width: 84,
-                        child: Align(
-                          alignment: Alignment.bottomRight,
-                          child: Text(
-                            rowCaption(r),
-                            textAlign: TextAlign.right,
-                            style: captionStyle,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                    ],
-                    Expanded(
-                      child: Row(
-                        children: _withGaps(<Widget>[
-                          for (int c = 0; c < cols; c++)
-                            Expanded(child: cell(r * cols + c)),
-                        ], gap),
-                      ),
-                    ),
-                  ],
+                  children: _withGaps(<Widget>[
+                    for (int c = 0; c < cols; c++)
+                      Expanded(child: cell(r * cols + c)),
+                  ], gap),
                 ),
               ),
           ], gap),
@@ -2634,7 +2717,10 @@ class _BackgroundSheet extends StatelessWidget {
                     info.url,
                     fit: BoxFit.fill,
                     gaplessPlayback: true,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                    errorBuilder: (_, Object error, ___) {
+                      debugPrint('Gagal memuat background ${info.url}: $error');
+                      return const SizedBox.shrink();
+                    },
                   ),
                   Positioned(
                     left: w * info.areaX / 100,
@@ -2733,9 +2819,10 @@ class _LargeFramePreview extends StatelessWidget {
     ];
 
     final Size sheet = _sheetMaxSize(frame, printMode);
+    final bool hugsBackground = frame.hasBackground && !frame.isTemplate;
 
-    return Container(
-      constraints: compact
+    final Widget box = Container(
+      constraints: (compact || hugsBackground)
           ? null
           : BoxConstraints(
               maxWidth: sheet.width * 0.85,
@@ -2762,7 +2849,6 @@ class _LargeFramePreview extends StatelessWidget {
       child: _buildFrameSheet(
         frame: frame,
         mode: printMode,
-        showCaptions: !compact,
         gap: compact ? 4 : 8,
         slotBuilder: (int source) => _FrameSlot(
           color: palette[source % palette.length],
@@ -2770,6 +2856,23 @@ class _LargeFramePreview extends StatelessWidget {
         ),
       ),
     );
+
+    if (!hugsBackground) return box;
+
+    // Pas seukuran gambar background (tanpa sisa putih).
+    final Widget fitted = AspectRatio(
+      aspectRatio: _backgroundSheetAspect(frame, printMode),
+      child: box,
+    );
+    return compact
+        ? fitted
+        : ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: sheet.width * 0.85,
+              maxHeight: sheet.height * 0.85,
+            ),
+            child: fitted,
+          );
   }
 }
 
@@ -2962,7 +3065,7 @@ class _StripPreview extends StatelessWidget {
     required this.shots,
     required this.assignments,
     required this.selectedSlot,
-    required this.filterMatrix,
+    this.filter = BoothFilter.none,
     required this.onSlotTap,
   });
 
@@ -2971,15 +3074,18 @@ class _StripPreview extends StatelessWidget {
   final List<BoothShot> shots;
   final List<int?> assignments;
   final int? selectedSlot;
-  final List<double>? filterMatrix;
+  final BoothFilter filter;
   final ValueChanged<int>? onSlotTap;
 
   @override
   Widget build(BuildContext context) {
     final Size sheet = _sheetMaxSize(frame, printMode);
+    final bool hugsBackground = frame.hasBackground && !frame.isTemplate;
 
-    return Container(
-      constraints: BoxConstraints(maxWidth: sheet.width, maxHeight: sheet.height),
+    final Widget box = Container(
+      constraints: hugsBackground
+          ? null
+          : BoxConstraints(maxWidth: sheet.width, maxHeight: sheet.height),
       padding: frame.hasBackground
           ? EdgeInsets.zero
           : const EdgeInsets.fromLTRB(14, 14, 14, 12),
@@ -2998,26 +3104,22 @@ class _StripPreview extends StatelessWidget {
           ),
         ],
       ),
-      child: Column(
-        children: <Widget>[
-          Expanded(
-            child: _buildFrameSheet(
-              frame: frame,
-              mode: printMode,
-              slotBuilder: (int source) => _buildSlot(context, source),
-            ),
-          ),
-          if (!frame.hasBackground) const SizedBox(height: 8),
-          if (!frame.hasBackground)
-          Text(
-            'The Mystery Photo Booth',
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: const Color(0xFF656565),
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 1.4,
-                ),
-          ),
-        ],
+      child: _buildFrameSheet(
+        frame: frame,
+        mode: printMode,
+        slotBuilder: (int source) => _buildSlot(context, source),
+      ),
+    );
+
+    if (!hugsBackground) return box;
+
+    // Wadah dipas persis seukuran gambar background (tidak ada sisa putih di
+    // kiri/kanan walau tinggi layar berubah).
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: sheet.width, maxHeight: sheet.height),
+      child: AspectRatio(
+        aspectRatio: _backgroundSheetAspect(frame, printMode),
+        child: box,
       ),
     );
   }
@@ -3074,13 +3176,7 @@ class _StripPreview extends StatelessWidget {
       } else {
         image = const ColoredBox(color: Colors.black26);
       }
-      if (filterMatrix != null) {
-        image = ColorFiltered(
-          colorFilter: ColorFilter.matrix(filterMatrix!),
-          child: image,
-        );
-      }
-      content = image;
+      content = applyBoothFilter(image, filter);
     }
 
     return GestureDetector(
@@ -3144,74 +3240,6 @@ class _StripPreview extends StatelessWidget {
                 ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Chip untuk mengganti frame aktif di layar compose.
-class _FrameChip extends StatelessWidget {
-  const _FrameChip({
-    required this.frame,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final BoothFrameOption frame;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.6),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(
-            color: selected ? frame.borderColor : const Color(0xFFD6CCBD),
-            width: selected ? 2.5 : 1,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Container(
-              width: 14,
-              height: 14,
-              decoration: BoxDecoration(
-                color: frame.borderColor,
-                borderRadius: BorderRadius.circular(4),
-              ),
-            ),
-            if (frame.isRemote) ...<Widget>[
-              const SizedBox(width: 6),
-              const Icon(Icons.cloud_done_outlined,
-                  size: 14, color: Color(0xFF7A7266)),
-            ],
-            const SizedBox(width: 8),
-            Text(
-              frame.name,
-              style: const TextStyle(
-                color: Color(0xFF2C2A26),
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              '${frame.slotCount} foto',
-              style: const TextStyle(
-                color: Color(0xFF7A7266),
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
         ),
       ),
     );
@@ -3326,67 +3354,158 @@ class _ShotThumb extends StatelessWidget {
 }
 
 /// Kartu di carousel filter (layar filterSelect).
+/// Kartu filter ala Instagram: thumbnail foto asli yang sudah terfilter + nama.
 class _FilterCard extends StatelessWidget {
   const _FilterCard({
     required this.filter,
     required this.selected,
     required this.onTap,
+    this.sample,
   });
 
   final BoothFilter filter;
   final bool selected;
   final VoidCallback onTap;
 
+  /// Foto contoh (belum terfilter). Null -> tampilkan gradient warna filter.
+  final Widget? sample;
+
   @override
   Widget build(BuildContext context) {
+    final Widget thumb = sample != null
+        ? applyBoothFilter(sample!, filter)
+        : DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: <Color>[
+                  filter.accentColor.withValues(alpha: 0.9),
+                  filter.accentColor.withValues(alpha: 0.35),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+            ),
+          );
+
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        width: 140,
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.94),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected ? filter.accentColor : const Color(0xFFD6CCBD),
-            width: selected ? 3 : 1,
-          ),
-        ),
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: 88,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Expanded(
-              child: Container(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                padding: const EdgeInsets.all(3),
                 decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: <Color>[
-                      filter.accentColor.withValues(alpha: 0.85),
-                      filter.accentColor.withValues(alpha: 0.35),
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: selected ? filter.accentColor : Colors.white24,
+                    width: selected ? 3 : 1,
                   ),
-                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: SizedBox.expand(child: thumb),
                 ),
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Text(
               filter.label,
-              style: const TextStyle(
-                color: Color(0xFF2C2A26),
-                fontWeight: FontWeight.w800,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: selected ? Colors.white : Colors.white70,
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Kartu pilihan background: thumbnail gambar + nama. [info] null = "Default"
+/// (tampilan frame bawaan, tanpa gambar background).
+class _DesignCard extends StatelessWidget {
+  const _DesignCard({
+    required this.label,
+    required this.accent,
+    required this.selected,
+    required this.onTap,
+    this.info,
+  });
+
+  final String label;
+  final FrameBackgroundInfo? info;
+  final Color accent;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final FrameBackgroundInfo? design = info;
+    final Widget thumb = design == null
+        ? const ColoredBox(
+            color: Colors.white,
+            child: Center(
+              child: Icon(Icons.crop_portrait, color: Color(0xFFB0A89A)),
+            ),
+          )
+        : Image.network(
+            design.url,
+            fit: BoxFit.cover,
+            cacheWidth: 300,
+            gaplessPlayback: true,
+            errorBuilder: (_, Object error, ___) {
+              debugPrint('Gagal memuat desain ${design.url}: $error');
+              return const ColoredBox(
+                color: Colors.black26,
+                child: Center(
+                  child: Icon(Icons.broken_image_outlined,
+                      color: AppTheme.textMuted),
+                ),
+              );
+            },
+          );
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: 96,
+        child: Column(
+          children: <Widget>[
+            Expanded(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: selected ? accent : Colors.white24,
+                    width: selected ? 3 : 1,
+                  ),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: SizedBox.expand(child: thumb),
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
             Text(
-              filter.description,
-              maxLines: 2,
+              label,
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Color(0xFF7A7266),
-                fontSize: 11,
+              style: TextStyle(
+                color: selected ? Colors.white : Colors.white70,
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
               ),
             ),
           ],

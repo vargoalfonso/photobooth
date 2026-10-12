@@ -52,15 +52,19 @@ class PhotoBoothConfig extends ChangeNotifier {
   /// Pesan error sinkronisasi terakhir (null bila sukses / belum pernah).
   String? remoteFramesError;
 
-  /// Background frame bawaan dari dashboard: `frame_key` -> URL gambar.
-  Map<String, FrameBackgroundInfo> frameBackgrounds =
-      const <String, FrameBackgroundInfo>{};
+  /// Background dari dashboard: `frame_key` -> daftar gambar background.
+  Map<String, List<FrameBackgroundInfo>> frameBackgrounds =
+      const <String, List<FrameBackgroundInfo>>{};
 
-  /// Frame bawaan Flutter lengkap dengan background dari dashboard.
-  List<BoothFrameOption> get defaultFrames => <BoothFrameOption>[
-        for (final BoothFrameOption f in kFrameOptions)
-          f.withBackground(frameBackgrounds[f.id]),
-      ];
+  /// Semua background yang bisa dipilih untuk sebuah frame bawaan (urutan dari
+  /// dashboard). Dipilih customer di langkah "Pilih Background"; sebelum itu
+  /// frame tampil default (tanpa background).
+  List<FrameBackgroundInfo> backgroundsFor(String frameId) =>
+      frameBackgrounds[frameId] ?? const <FrameBackgroundInfo>[];
+
+  /// Frame bawaan Flutter. Awalnya tampil default; background baru dipasang
+  /// setelah customer memilihnya.
+  List<BoothFrameOption> get defaultFrames => kFrameOptions;
 
   /// Semua frame yang bisa dipilih: bawaan Flutter + template server.
   List<BoothFrameOption> get allFrames =>
@@ -198,15 +202,9 @@ class PhotoBoothConfig extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setFrameBackgrounds(Map<String, FrameBackgroundInfo> value) {
-    frameBackgrounds = Map<String, FrameBackgroundInfo>.unmodifiable(value);
-    if (!frame.isRemote) {
-      final int index =
-          kFrameOptions.indexWhere((BoothFrameOption f) => f.id == frame.id);
-      if (index != -1) {
-        frame = kFrameOptions[index].withBackground(frameBackgrounds[frame.id]);
-      }
-    }
+  void setFrameBackgrounds(Map<String, List<FrameBackgroundInfo>> value) {
+    frameBackgrounds =
+        Map<String, List<FrameBackgroundInfo>>.unmodifiable(value);
     notifyListeners();
   }
 

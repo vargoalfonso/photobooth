@@ -93,15 +93,17 @@ class PhotoboothApiService {
         .toList(growable: false);
   }
 
-  /// GET /api/frame-backgrounds -> peta `frame_key` ke [FrameBackgroundInfo]
-  /// (gambar background + area foto) untuk frame bawaan Flutter.
-  Future<Map<String, FrameBackgroundInfo>> listFrameBackgrounds() async {
+  /// GET /api/frame-backgrounds -> peta `frame_key` ke DAFTAR desain
+  /// ([FrameBackgroundInfo], urut seperti di dashboard) untuk frame bawaan
+  /// Flutter. Server lama (1 background per frame) tetap terbaca: listnya
+  /// berisi satu desain.
+  Future<Map<String, List<FrameBackgroundInfo>>> listFrameBackgrounds() async {
     final Map<String, dynamic> raw = await _client.getJson('frame-backgrounds');
     final Object? data = raw['data'];
     final RegExp leadingSlashes = RegExp(r'^/+');
     final String host = _client.hostBaseUrl;
-    final Map<String, FrameBackgroundInfo> result =
-        <String, FrameBackgroundInfo>{};
+    final Map<String, List<FrameBackgroundInfo>> result =
+        <String, List<FrameBackgroundInfo>>{};
 
     double num0(Object? v, double fallback) =>
         v is num ? v.toDouble() : (double.tryParse(v?.toString() ?? '') ?? fallback);
@@ -122,14 +124,20 @@ class PhotoboothApiService {
         final Map<String, dynamic> a =
             area is Map<String, dynamic> ? area : const <String, dynamic>{};
 
-        result[key] = FrameBackgroundInfo(
+        final List<FrameBackgroundInfo> designs =
+            result.putIfAbsent(key, () => <FrameBackgroundInfo>[]);
+        designs.add(FrameBackgroundInfo(
+          id: (item['id'] as num?)?.toInt(),
+          name: item['name']?.toString().trim().isNotEmpty == true
+              ? item['name'].toString().trim()
+              : 'Desain ${designs.length + 1}',
           url: url,
           aspect: (w > 0 && h > 0) ? w / h : null,
           areaX: num0(a['x'], 4),
           areaY: num0(a['y'], 3),
           areaW: num0(a['w'], 92),
           areaH: num0(a['h'], 94),
-        );
+        ));
       }
     }
     return result;
@@ -142,7 +150,7 @@ class PhotoboothApiService {
     final PhotoboothApiService? svc = PhotoboothApiService.fromConfig(config);
     if (svc == null) {
       config.setRemoteFrames(const <BoothFrameOption>[]);
-      config.setFrameBackgrounds(const <String, FrameBackgroundInfo>{});
+      config.setFrameBackgrounds(const <String, List<FrameBackgroundInfo>>{});
       return;
     }
     config.setRemoteFramesLoading(true);
@@ -404,14 +412,6 @@ class PrintResult {
   final bool printDispatched;
 }
 
-/// Terjemahkan enum filter Flutter jadi string yang disimpan monolith.
-String? filterToApiString(BoothFilter filter) {
-  return switch (filter) {
-    BoothFilter.none => null,
-    BoothFilter.warm => 'warm',
-    BoothFilter.cool => 'cool',
-    BoothFilter.noir => 'noir',
-    BoothFilter.vintage => 'vintage',
-    BoothFilter.vivid => 'vivid',
-  };
-}
+/// Terjemahkan enum filter Flutter jadi string yang disimpan monolith
+/// (`sessions.filter`). Tanpa filter -> null.
+String? filterToApiString(BoothFilter filter) => filter.apiKey;

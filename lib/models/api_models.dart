@@ -6,11 +6,14 @@
 
 import 'dart:convert';
 
-/// Background frame bawaan dari dashboard (`GET /api/frame-backgrounds`).
+/// Satu DESAIN background frame bawaan dari dashboard
+/// (`GET /api/frame-backgrounds`; satu frame bisa punya banyak desain).
 /// [aspect] = lebar / tinggi gambar; area* = kotak tempat foto ditempatkan
 /// (persen dari lembar).
 class FrameBackgroundInfo {
   const FrameBackgroundInfo({
+    this.id,
+    this.name = '',
     required this.url,
     this.aspect,
     this.areaX = 4,
@@ -19,6 +22,11 @@ class FrameBackgroundInfo {
     this.areaH = 94,
   });
 
+  /// ID desain di server (null untuk server lama yang belum mengirimnya).
+  final int? id;
+
+  /// Nama desain, mis. "Pantai".
+  final String name;
   final String url;
   final double? aspect;
   final double areaX;
