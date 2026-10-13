@@ -90,15 +90,20 @@ class MonolithApiClient {
     required String baseUrl,
     String? token,
     Duration timeout = const Duration(seconds: 30),
+    // Upload banyak foto resolusi tinggi (mis. 8 JPEG dari Canon) bisa
+    // jauh lebih lama dari 30 detik, jadi diberi batas waktu sendiri.
+    Duration uploadTimeout = const Duration(minutes: 3),
     http.Client? httpClient,
   })  : _base = _normalizeBase(baseUrl),
         _token = token,
         _timeout = timeout,
+        _uploadTimeout = uploadTimeout,
         _http = httpClient ?? http.Client();
 
   final String _base; // ex: http://127.0.0.1:8000/api
   final String? _token;
   final Duration _timeout;
+  final Duration _uploadTimeout;
   final http.Client _http;
 
   /// Base URL yang sudah dinormalisasi (tanpa trailing slash).
@@ -227,8 +232,9 @@ class MonolithApiClient {
     }
 
     final http.StreamedResponse streamed =
-        await request.send().timeout(_timeout);
-    final http.Response res = await http.Response.fromStream(streamed);
+        await request.send().timeout(_uploadTimeout);
+    final http.Response res =
+        await http.Response.fromStream(streamed).timeout(_uploadTimeout);
     return _decode(res);
   }
 

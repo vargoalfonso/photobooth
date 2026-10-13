@@ -1,6 +1,7 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
+import '../models/api_models.dart';
 import '../models/booth_models.dart';
 
 class PhotoBoothConfig extends ChangeNotifier {
@@ -24,6 +25,10 @@ class PhotoBoothConfig extends ChangeNotifier {
   /// (diverifikasi ke dashboard).
   bool requirePayment = true;
 
+  /// True bila nilai [requirePayment] berasal dari server (`GET /api/config`).
+  /// Saat true, switch di halaman API dikunci supaya tidak beda dengan server.
+  bool requirePaymentFromServer = false;
+
   // ----------------------------------------------------- Canon EOS R100
   /// Saat true, live view dan hasil foto diambil dari Canon EOS R100
   /// (bukan webcam/kamera perangkat).
@@ -36,6 +41,34 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   BoothFilter filter = BoothFilter.none;
   BoothFrameOption frame = kFrameOptions.first;
+
+  /// Template dari server (`GET /api/templates`). Ditampilkan berdampingan
+  /// dengan frame bawaan Flutter ([kFrameOptions]).
+  List<BoothFrameOption> remoteFrames = const <BoothFrameOption>[];
+
+  /// True selama sinkronisasi template dari server berjalan.
+  bool remoteFramesLoading = false;
+
+  /// Pesan error sinkronisasi terakhir (null bila sukses / belum pernah).
+  String? remoteFramesError;
+
+  /// Background dari dashboard: `frame_key` -> daftar gambar background.
+  Map<String, List<FrameBackgroundInfo>> frameBackgrounds =
+      const <String, List<FrameBackgroundInfo>>{};
+
+  /// Semua background yang bisa dipilih untuk sebuah frame bawaan (urutan dari
+  /// dashboard). Dipilih customer di langkah "Pilih Background"; sebelum itu
+  /// frame tampil default (tanpa background).
+  List<FrameBackgroundInfo> backgroundsFor(String frameId) =>
+      frameBackgrounds[frameId] ?? const <FrameBackgroundInfo>[];
+
+  /// Frame bawaan Flutter. Awalnya tampil default; background baru dipasang
+  /// setelah customer memilihnya.
+  List<BoothFrameOption> get defaultFrames => kFrameOptions;
+
+  /// Semua frame yang bisa dipilih: bawaan Flutter + template server.
+  List<BoothFrameOption> get allFrames =>
+      <BoothFrameOption>[...defaultFrames, ...remoteFrames];
   double cropScale = 1.0;
   double cropOffsetX = 0.0;
   double cropOffsetY = 0.0;
@@ -108,7 +141,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   int extraPrintDiscountThreshold = 3;
   int maximumExtraPrints = 10;
   bool enableExtraPrintPayment = false;
-  String boothName = 'VARGOBOOTH';
+  String boothName = 'PHOTOBOOTH';
   String boothTagline = 'learn fun with me';
   String adminPin = '1234';
   String? customLogoPath;
@@ -166,6 +199,31 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   void setFrame(BoothFrameOption value) {
     frame = value;
+    notifyListeners();
+  }
+
+  void setFrameBackgrounds(Map<String, List<FrameBackgroundInfo>> value) {
+    frameBackgrounds =
+        Map<String, List<FrameBackgroundInfo>>.unmodifiable(value);
+    notifyListeners();
+  }
+
+  void setRemoteFramesLoading(bool value) {
+    remoteFramesLoading = value;
+    notifyListeners();
+  }
+
+  /// Ganti daftar template server. Bila frame aktif adalah template yang
+  /// sudah dihapus di server, kembali ke frame bawaan pertama.
+  void setRemoteFrames(List<BoothFrameOption> value, {String? error}) {
+    remoteFrames = List<BoothFrameOption>.unmodifiable(value);
+    remoteFramesError = error;
+    remoteFramesLoading = false;
+    if (frame.isRemote) {
+      final int index =
+          value.indexWhere((BoothFrameOption f) => f.id == frame.id);
+      frame = index == -1 ? kFrameOptions.first : value[index];
+    }
     notifyListeners();
   }
 
@@ -768,6 +826,17 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   void setRequirePayment(bool value) {
     requirePayment = value;
+    notifyListeners();
+  }
+
+  /// Ikuti pengaturan server (sumber kebenaran). Dipanggil setelah
+  /// `GET /api/config` berhasil.
+  void applyServerConfig({required bool requirePayment}) {
+    if (this.requirePayment == requirePayment && requirePaymentFromServer) {
+      return;
+    }
+    this.requirePayment = requirePayment;
+    requirePaymentFromServer = true;
     notifyListeners();
   }
 

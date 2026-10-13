@@ -46,6 +46,18 @@ class PhotoboothApiService {
     }
   }
 
+  // ---------------------------------------------------------------- Config
+
+  /// GET /api/config — pengaturan server yang harus diikuti kiosk.
+  /// Server lama tanpa endpoint ini membalas 404; caller boleh mengabaikannya.
+  Future<ServerConfigDto> getServerConfig() async {
+    final Map<String, dynamic> raw = await _client.getJson('config');
+    final Object? data = raw['data'];
+    return ServerConfigDto.fromJson(
+      data is Map<String, dynamic> ? data : raw,
+    );
+  }
+
   // ---------------------------------------------------------------- Frames
 
   /// GET /api/templates?category=... — daftar frame aktif.
@@ -65,6 +77,109 @@ class PhotoboothApiService {
           .toList(growable: false);
     }
     return const <PhotoFrameDto>[];
+  }
+
+  /// GET /api/templates lalu ubah jadi [BoothFrameOption] bertipe template
+  /// (strip vertikal dengan posisi slot dari `layout_json`). Template tanpa
+  /// slot dilewati karena tidak bisa diisi foto.
+  Future<List<BoothFrameOption>> listRemoteFrames({String? category}) async {
+    final List<PhotoFrameDto> dtos = await listTemplates(category: category);
+    final String host = _client.hostBaseUrl;
+    return dtos
+        .where((PhotoFrameDto d) => d.isActive && d.slotCount > 0)
+        .map((PhotoFrameDto d) =>
+            BoothFrameOption.fromTemplate(d, hostBaseUrl: host))
+        .where((BoothFrameOption f) => f.slotCount > 0)
+        .toList(growable: false);
+  }
+
+  /// GET /api/frame-backgrounds -> peta `frame_key` ke DAFTAR desain
+  /// ([FrameBackgroundInfo], urut seperti di dashboard) untuk frame bawaan
+  /// Flutter. Server lama (1 background per frame) tetap terbaca: listnya
+  /// berisi satu desain.
+  Future<Map<String, List<FrameBackgroundInfo>>> listFrameBackgrounds() async {
+    final Map<String, dynamic> raw = await _client.getJson('frame-backgrounds');
+    final Object? data = raw['data'];
+    final RegExp leadingSlashes = RegExp(r'^/+');
+    final String host = _client.hostBaseUrl;
+    final Map<String, List<FrameBackgroundInfo>> result =
+        <String, List<FrameBackgroundInfo>>{};
+
+    double num0(Object? v, double fallback) =>
+        v is num ? v.toDouble() : (double.tryParse(v?.toString() ?? '') ?? fallback);
+
+    if (data is List) {
+      for (final Map<String, dynamic> item
+          in data.whereType<Map<String, dynamic>>()) {
+        final String key = item['frame_key']?.toString() ?? '';
+        String url = item['image_url']?.toString() ?? '';
+        if (key.isEmpty || url.isEmpty) continue;
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          url = '$host/${url.replaceAll(leadingSlashes, '')}';
+        }
+
+        final double w = num0(item['width'], 0);
+        final double h = num0(item['height'], 0);
+        final Object? area = item['area'];
+        final Map<String, dynamic> a =
+            area is Map<String, dynamic> ? area : const <String, dynamic>{};
+
+        final List<FrameBackgroundInfo> designs =
+            result.putIfAbsent(key, () => <FrameBackgroundInfo>[]);
+        designs.add(FrameBackgroundInfo(
+          id: (item['id'] as num?)?.toInt(),
+          name: item['name']?.toString().trim().isNotEmpty == true
+              ? item['name'].toString().trim()
+              : 'Desain ${designs.length + 1}',
+          url: url,
+          aspect: (w > 0 && h > 0) ? w / h : null,
+          areaX: num0(a['x'], 4),
+          areaY: num0(a['y'], 3),
+          areaW: num0(a['w'], 92),
+          areaH: num0(a['h'], 94),
+        ));
+      }
+    }
+    return result;
+  }
+
+  /// Ambil template dari server dan simpan ke [config.remoteFrames].
+  /// Aman dipanggil kapan saja: gagal koneksi hanya mengisi `remoteFramesError`
+  /// dan frame bawaan tetap bisa dipakai.
+  static Future<void> syncFrames(PhotoBoothConfig config) async {
+    final PhotoboothApiService? svc = PhotoboothApiService.fromConfig(config);
+    if (svc == null) {
+      config.setRemoteFrames(const <BoothFrameOption>[]);
+      config.setFrameBackgrounds(const <String, List<FrameBackgroundInfo>>{});
+      return;
+    }
+    config.setRemoteFramesLoading(true);
+    try {
+      // Server = sumber kebenaran untuk "wajib bayar". Gagal/404 -> pakai
+      // nilai lokal.
+      try {
+        final ServerConfigDto serverConfig = await svc.getServerConfig();
+        config.applyServerConfig(requirePayment: serverConfig.requirePayment);
+      } catch (_) {}
+
+      try {
+        config.setRemoteFrames(await svc.listRemoteFrames());
+      } on ApiException catch (e) {
+        config.setRemoteFrames(config.remoteFrames, error: e.message);
+      } catch (e) {
+        config.setRemoteFrames(
+          config.remoteFrames,
+          error: 'Tidak bisa menghubungi server: $e',
+        );
+      }
+
+      // Background frame bawaan. Gagal/belum ada endpoint -> pakai yang lama.
+      try {
+        config.setFrameBackgrounds(await svc.listFrameBackgrounds());
+      } catch (_) {}
+    } finally {
+      svc.close();
+    }
   }
 
   // -------------------------------------------------------------- Payments
@@ -217,8 +332,10 @@ class PhotoboothApiService {
     String? layout,
     String? filter,
     DateTime? takenAt,
+    Map<String, dynamic>? composition,
   }) async {
     final Map<String, dynamic> body = <String, dynamic>{
+      if (composition != null) 'composition': composition,
       if (photoFrameId != null) 'photo_frame_id': photoFrameId,
       if (customerName != null) 'customer_name': customerName,
       if (layout != null) 'layout': layout,
@@ -243,21 +360,59 @@ class PhotoboothApiService {
     await _client.delete('photo-sessions/$sessionId/photos/$mediaId');
   }
 
-  /// POST /api/photo-sessions/{id}/print — kirim email + trigger printer
-  /// command (bila server dikonfigurasi PHOTOBOOTH_PRINTER_COMMAND).
+  /// POST /api/photo-sessions/{id}/print — jalankan printer di server dan/atau
+  /// kirim email (semua foto + mock strip dalam ZIP, mock juga tampil di isi
+  /// email). [email] null = hanya print; [print] false = hanya email.
+  /// [markPrinted] false bila kiosk sudah memanggil [markPrinted] sendiri.
   Future<PrintResult> printSession({
     required int sessionId,
-    required String email,
+    String? email,
+    bool print = true,
+    bool markPrinted = true,
   }) async {
     final Map<String, dynamic> raw = await _client.postJson(
       'photo-sessions/$sessionId/print',
-      body: <String, dynamic>{'email': email},
+      body: <String, dynamic>{
+        if (email != null && email.isNotEmpty) 'email': email,
+        'print': print,
+        'mark_printed': markPrinted,
+      },
     );
     return PrintResult(
       message: raw['message']?.toString() ?? 'Print job dikirim.',
       emailSent: raw['email_sent'] == true,
       printDispatched: raw['print_dispatched'] == true,
     );
+  }
+
+  /// POST /api/photo-sessions/{id}/strip — unggah gambar mock strip (hasil
+  /// akhir: frame + background + foto + filter) dalam format PNG.
+  Future<void> uploadStrip(int sessionId, Uint8List pngBytes) async {
+    await _client.postMultipart(
+      'photo-sessions/$sessionId/strip',
+      files: <ApiFileUpload>[
+        ApiFileUpload(
+          fieldName: 'strip',
+          filename: 'strip-mock.png',
+          bytes: pngBytes,
+        ),
+      ],
+    );
+  }
+
+  /// POST /api/photo-sessions/{id}/printed — tandai sesi sudah dicetak dari
+  /// kiosk, supaya muncul di menu "Hasil Print" pada dashboard Laravel.
+  Future<PhotoSessionDto> markPrinted(
+    int sessionId, {
+    Map<String, dynamic>? composition,
+  }) async {
+    final Map<String, dynamic> raw = await _client.postJson(
+      'photo-sessions/$sessionId/printed',
+      body: composition == null
+          ? null
+          : <String, dynamic>{'composition': composition},
+    );
+    return _extractSession(raw);
   }
 
   // ------------------------------------------- helper: extract session json
@@ -297,14 +452,6 @@ class PrintResult {
   final bool printDispatched;
 }
 
-/// Terjemahkan enum filter Flutter jadi string yang disimpan monolith.
-String? filterToApiString(BoothFilter filter) {
-  return switch (filter) {
-    BoothFilter.none => null,
-    BoothFilter.warm => 'warm',
-    BoothFilter.cool => 'cool',
-    BoothFilter.noir => 'noir',
-    BoothFilter.vintage => 'vintage',
-    BoothFilter.vivid => 'vivid',
-  };
-}
+/// Terjemahkan enum filter Flutter jadi string yang disimpan monolith
+/// (`sessions.filter`). Tanpa filter -> null.
+String? filterToApiString(BoothFilter filter) => filter.apiKey;

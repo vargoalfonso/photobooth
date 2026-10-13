@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/booth_models.dart';
+import '../services/photobooth_api_service.dart';
 import '../state/photo_booth_config.dart';
 
 class FramesPage extends StatefulWidget {
@@ -17,71 +18,79 @@ class FramesPage extends StatefulWidget {
 
 class _FramesPageState extends State<FramesPage> {
   late List<_FrameManagerItem> _localFrames;
-  late List<_FrameManagerItem> _cloudFrames;
+  List<_FrameManagerItem> _cloudFrames = <_FrameManagerItem>[];
+  bool _cloudLoading = false;
+  String? _cloudError;
 
   @override
   void initState() {
     super.initState();
     _localFrames = <_FrameManagerItem>[
-      _FrameManagerItem.fromOption(
-        kFrameOptions[0],
-        sizeMb: 0.22,
-        modifiedAt: DateTime(2026, 4, 4, 8, 45),
-        tags: const <String>['All', '2R', 'primary'],
-        isActive: widget.config.frame.id == kFrameOptions[0].id,
-      ),
-      _FrameManagerItem.fromOption(
-        kFrameOptions[1],
-        sizeMb: 0.20,
-        modifiedAt: DateTime(2026, 4, 4, 8, 45),
-        tags: const <String>['All', 'Normal', 'primary'],
-        isActive: widget.config.frame.id == kFrameOptions[1].id,
-      ),
-      _FrameManagerItem.fromOption(
-        kFrameOptions[2],
-        sizeMb: 0.20,
-        modifiedAt: DateTime(2026, 4, 4, 8, 45),
-        tags: const <String>['All', '2R', 'primary'],
-        isActive: widget.config.frame.id == kFrameOptions[2].id,
-      ),
+      for (final BoothFrameOption option in widget.config.defaultFrames)
+        _FrameManagerItem.fromOption(
+          option,
+          sizeMb: 0.20,
+          modifiedAt: DateTime(2026, 4, 4, 8, 45),
+          tags: const <String>['Default', '2R', 'primary'],
+          isActive: widget.config.frame.id == option.id,
+        ),
+      for (final BoothFrameOption option in widget.config.remoteFrames)
+        _FrameManagerItem.fromOption(
+          option,
+          tags: const <String>['Server', 'vertical'],
+          isActive: widget.config.frame.id == option.id,
+        ),
     ];
+    _loadCloudFrames();
+  }
 
-    _cloudFrames = <_FrameManagerItem>[
-      _FrameManagerItem.fromOption(
-        kFrameOptions[3],
-        sizeMb: 0.20,
-        modifiedAt: DateTime(2026, 4, 4, 15, 43),
-        tags: const <String>['All', 'Normal', 'primary'],
-      ),
-      _FrameManagerItem.fromOption(
-        kFrameOptions[2],
-        sizeMb: 0.20,
-        modifiedAt: DateTime(2026, 3, 23, 0, 55),
-        tags: const <String>['All', '2R', 'primary'],
-      ),
-      _FrameManagerItem.fromOption(
-        kFrameOptions[0],
-        sizeMb: 0.22,
-        modifiedAt: DateTime(2026, 3, 23, 0, 30),
-        tags: const <String>['All', '2R', 'primary'],
-      ),
-    ];
+  /// Ambil daftar template dari `GET /api/templates`.
+  Future<void> _loadCloudFrames() async {
+    final PhotoboothApiService? svc =
+        PhotoboothApiService.fromConfig(widget.config);
+    if (svc == null) {
+      setState(() => _cloudError = 'Base URL API belum diisi.');
+      return;
+    }
+    setState(() {
+      _cloudLoading = true;
+      _cloudError = null;
+    });
+    try {
+      final List<BoothFrameOption> remote = await svc.listRemoteFrames();
+      if (!mounted) return;
+      setState(() {
+        _cloudFrames = <_FrameManagerItem>[
+          for (final BoothFrameOption option in remote)
+            _FrameManagerItem.fromOption(
+              option,
+              tags: const <String>['Server', 'vertical'],
+            ),
+        ];
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _cloudError = 'Gagal memuat template: $e');
+    } finally {
+      svc.close();
+      if (mounted) setState(() => _cloudLoading = false);
+    }
   }
 
   void _refreshLocalFrames() {
     setState(() {
       _localFrames = List<_FrameManagerItem>.from(_localFrames)
-        ..sort((a, b) => b.modifiedAt.compareTo(a.modifiedAt));
+        ..sort((a, b) => (b.modifiedAt ?? DateTime(0))
+            .compareTo(a.modifiedAt ?? DateTime(0)));
     });
     _showMessage('Local frames refreshed.');
   }
 
-  void _refreshCloudFrames() {
-    setState(() {
-      _cloudFrames = List<_FrameManagerItem>.from(_cloudFrames)
-        ..sort((a, b) => b.modifiedAt.compareTo(a.modifiedAt));
-    });
-    _showMessage('Cloud frames refreshed.');
+  Future<void> _refreshCloudFrames() async {
+    await _loadCloudFrames();
+    if (mounted && _cloudError == null) {
+      _showMessage('Cloud frames refreshed.');
+    }
   }
 
   void _toggleSelected(String id, bool value) {
@@ -104,7 +113,7 @@ class _FramesPageState extends State<FramesPage> {
     }
 
     if (value) {
-      final BoothFrameOption frame = kFrameOptions.firstWhere(
+      final BoothFrameOption frame = widget.config.allFrames.firstWhere(
         (BoothFrameOption option) => option.id == id,
         orElse: () => widget.config.frame,
       );
@@ -137,10 +146,11 @@ class _FramesPageState extends State<FramesPage> {
     final bool exists =
         _localFrames.any((_FrameManagerItem item) => item.id == id);
     if (!exists) {
+      _addToConfig(<BoothFrameOption>[cloudItem.option]);
       setState(() {
         _localFrames = <_FrameManagerItem>[
+          ..._localFrames,
           cloudItem.copyWith(isSelected: false),
-          ..._localFrames
         ];
       });
     }
@@ -156,6 +166,7 @@ class _FramesPageState extends State<FramesPage> {
           .where((_FrameManagerItem item) => !localIds.contains(item.id))
           .map((_FrameManagerItem item) => item.copyWith(isSelected: false))
           .toList();
+      _addToConfig(missing.map((_FrameManagerItem i) => i.option).toList());
       _localFrames = <_FrameManagerItem>[..._localFrames, ...missing];
     });
     _showMessage('All cloud frames synced.');
@@ -169,12 +180,37 @@ class _FramesPageState extends State<FramesPage> {
       return;
     }
 
+    final Set<String> removeIds = _localFrames
+        .where((_FrameManagerItem item) => item.isSelected && item.isRemote)
+        .map((_FrameManagerItem item) => item.id)
+        .toSet();
+    final int protectedCount = selectedCount - removeIds.length;
+
+    widget.config.setRemoteFrames(<BoothFrameOption>[
+      for (final BoothFrameOption f in widget.config.remoteFrames)
+        if (!removeIds.contains(f.id)) f,
+    ]);
     setState(() {
       _localFrames = _localFrames
-          .where((_FrameManagerItem item) => !item.isSelected)
+          .where((_FrameManagerItem item) => !removeIds.contains(item.id))
+          .map((_FrameManagerItem item) => item.copyWith(isSelected: false))
           .toList();
     });
-    _showMessage('$selectedCount local frame(s) deleted.');
+    _showMessage(
+      '${removeIds.length} local frame(s) deleted.'
+      '${protectedCount > 0 ? ' $protectedCount frame bawaan tidak bisa dihapus.' : ''}',
+    );
+  }
+
+  /// Simpan template yang disinkronkan ke config supaya muncul di booth.
+  void _addToConfig(List<BoothFrameOption> options) {
+    final Set<String> have =
+        widget.config.remoteFrames.map((BoothFrameOption f) => f.id).toSet();
+    widget.config.setRemoteFrames(<BoothFrameOption>[
+      ...widget.config.remoteFrames,
+      for (final BoothFrameOption o in options)
+        if (!have.contains(o.id)) o,
+    ]);
   }
 
   void _showMessage(String message) {
@@ -263,9 +299,13 @@ class _FramesPageState extends State<FramesPage> {
                               Expanded(
                                 child: _FramePanel(
                                   title: 'Cloud Frames',
-                                  subtitle:
-                                      'Found ${_cloudFrames.length} frames available for sync',
-                                  subtitleColor: const Color(0xFF5DBF74),
+                                  subtitle: _cloudLoading
+                                      ? 'Memuat template dari server...'
+                                      : (_cloudError ??
+                                          'Found ${_cloudFrames.length} frames available for sync'),
+                                  subtitleColor: _cloudError != null
+                                      ? const Color(0xFFE64E4E)
+                                      : const Color(0xFF5DBF74),
                                   actionLabel: 'Refresh',
                                   onActionPressed: _refreshCloudFrames,
                                   footer: FilledButton(
@@ -320,27 +360,31 @@ class _FramesPageState extends State<FramesPage> {
 
 class _FrameManagerItem {
   const _FrameManagerItem({
+    required this.option,
     required this.id,
     required this.name,
     required this.description,
     required this.gradient,
     required this.borderColor,
-    required this.sizeMb,
-    required this.modifiedAt,
     required this.tags,
+    this.sizeMb,
+    this.modifiedAt,
+    this.thumbUrl,
+    this.extra,
     this.isSelected = false,
     this.isActive = false,
   });
 
   factory _FrameManagerItem.fromOption(
     BoothFrameOption option, {
-    required double sizeMb,
-    required DateTime modifiedAt,
     required List<String> tags,
+    double? sizeMb,
+    DateTime? modifiedAt,
     bool isSelected = false,
     bool isActive = false,
   }) {
     return _FrameManagerItem(
+      option: option,
       id: option.id,
       name: option.name,
       description: option.description,
@@ -349,27 +393,38 @@ class _FrameManagerItem {
       sizeMb: sizeMb,
       modifiedAt: modifiedAt,
       tags: tags,
+      thumbUrl: option.imageUrl ?? option.backgroundUrl,
+      extra: option.isRemote
+          ? '${option.slotCount} slot - kanvas '
+              '${option.canvasWidth.round()}x${option.canvasHeight.round()}'
+          : null,
       isSelected: isSelected,
       isActive: isActive,
     );
   }
 
+  final BoothFrameOption option;
   final String id;
   final String name;
   final String description;
   final List<Color> gradient;
   final Color borderColor;
-  final double sizeMb;
-  final DateTime modifiedAt;
+  final double? sizeMb;
+  final DateTime? modifiedAt;
+  final String? thumbUrl;
+  final String? extra;
   final List<String> tags;
   final bool isSelected;
   final bool isActive;
+
+  bool get isRemote => option.isRemote;
 
   _FrameManagerItem copyWith({
     bool? isSelected,
     bool? isActive,
   }) {
     return _FrameManagerItem(
+      option: option,
       id: id,
       name: name,
       description: description,
@@ -378,6 +433,8 @@ class _FrameManagerItem {
       sizeMb: sizeMb,
       modifiedAt: modifiedAt,
       tags: tags,
+      thumbUrl: thumbUrl,
+      extra: extra,
       isSelected: isSelected ?? this.isSelected,
       isActive: isActive ?? this.isActive,
     );
@@ -584,12 +641,26 @@ class _FrameThumbnail extends StatelessWidget {
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: item.borderColor, width: 3),
         ),
-        child: Center(
-          child: Icon(
-            Icons.crop_portrait,
-            color: item.borderColor.withValues(alpha: 0.85),
-          ),
-        ),
+        child: item.thumbUrl == null
+            ? Center(
+                child: Icon(
+                  Icons.crop_portrait,
+                  color: item.borderColor.withValues(alpha: 0.85),
+                ),
+              )
+            : ClipRRect(
+                borderRadius: BorderRadius.circular(5),
+                child: Image.network(
+                  item.thumbUrl!,
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => Center(
+                    child: Icon(
+                      Icons.crop_portrait,
+                      color: item.borderColor.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ),
+              ),
       ),
     );
   }
@@ -625,18 +696,27 @@ class _FrameMeta extends StatelessWidget {
               ),
         ),
         const SizedBox(height: 4),
-        Text(
-          'Size: ${item.sizeMb.toStringAsFixed(2)} MB',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: const Color(0xFF8A8F99),
-              ),
-        ),
-        Text(
-          'Modified: ${_formatDate(item.modifiedAt)}',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: const Color(0xFF8A8F99),
-              ),
-        ),
+        if (item.sizeMb != null)
+          Text(
+            'Size: ${item.sizeMb!.toStringAsFixed(2)} MB',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: const Color(0xFF8A8F99),
+                ),
+          ),
+        if (item.modifiedAt != null)
+          Text(
+            'Modified: ${_formatDate(item.modifiedAt!)}',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: const Color(0xFF8A8F99),
+                ),
+          ),
+        if (item.extra != null)
+          Text(
+            item.extra!,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: const Color(0xFF8A8F99),
+                ),
+          ),
         if (showDescription) ...<Widget>[
           const SizedBox(height: 4),
           Text(
@@ -674,6 +754,12 @@ class _TagChip extends StatelessWidget {
         break;
       case 'normal':
         backgroundColor = const Color(0xFFB28DFF);
+        break;
+      case 'server':
+        backgroundColor = const Color(0xFFFFA61A);
+        break;
+      case 'vertical':
+        backgroundColor = const Color(0xFF3B82F6);
         break;
       case 'primary':
         backgroundColor = const Color(0xFF31C48D);

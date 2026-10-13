@@ -69,11 +69,23 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     final PhotoboothApiService service = PhotoboothApiService(client);
     try {
       final List<PhotoFrameDto> frames = await service.listTemplates();
+
+      // Peringatan setup server (storage link, migrasi, mail, printer).
+      // Server lama tanpa /api/config -> abaikan.
+      List<String> warnings = const <String>[];
+      try {
+        final ServerConfigDto serverConfig = await service.getServerConfig();
+        warnings = serverConfig.warnings;
+        widget.config
+            .applyServerConfig(requirePayment: serverConfig.requirePayment);
+      } catch (_) {}
+
       if (!mounted) return;
       setState(() {
         _testOk = true;
         _testResult =
-            'Terhubung. ${frames.length} template ditemukan di server.';
+            'Terhubung. ${frames.length} template ditemukan di server.'
+            '${warnings.isEmpty ? '' : '\n\nPerhatian:\n- ${warnings.join('\n- ')}'}';
       });
     } on ApiException catch (e) {
       if (!mounted) return;
@@ -160,12 +172,15 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Wajib bayar sebelum mulai'),
-                      subtitle: const Text(
-                          'Pelanggan scan QR dari dashboard; booth baru jalan setelah status paid.'),
+                      subtitle: Text(widget.config.requirePaymentFromServer
+                          ? 'Mengikuti pengaturan server (PHOTOBOOTH_REQUIRE_PAYMENT di .env monolith).'
+                          : 'Pelanggan scan QR dari dashboard; booth baru jalan setelah status paid.'),
                       value: widget.config.requirePayment,
-                      onChanged: (bool value) {
-                        widget.config.setRequirePayment(value);
-                      },
+                      onChanged: widget.config.requirePaymentFromServer
+                          ? null
+                          : (bool value) {
+                              widget.config.setRequirePayment(value);
+                            },
                     ),
                     const SizedBox(height: 8),
                     TextField(
