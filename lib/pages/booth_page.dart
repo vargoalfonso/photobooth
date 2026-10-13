@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
+import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/services.dart';
 
 import '../models/api_models.dart';
@@ -16,6 +19,7 @@ import '../services/photobooth_api_service.dart';
 import '../state/photo_booth_config.dart';
 import '../theme/app_theme.dart';
 import '../widgets/capture_widgets.dart';
+import '../widgets/landing_widgets.dart';
 import 'payment_gate_page.dart';
 
 /// Satu hasil jepretan dalam sesi booth.
@@ -179,6 +183,24 @@ class _BoothPageState extends State<BoothPage> {
   /// dari tray thumbnail. Null bila belum ada slot yang dipilih.
   int? _selectedSlot;
 
+  /// Foto (index ke _shots) yang sedang di-retake + urutan yang sedang jalan.
+  /// Kosong = bukan sedang retake. Dipakai untuk menampilkan label
+  /// "Retake Slot N" di layar kamera, bukan progres sesi biasa.
+  List<int> _retakeTargets = <int>[];
+  int _retakeStep = 0;
+
+  bool get _isRetaking => _sessionRunning && _retakeTargets.isNotEmpty;
+
+  /// Label foto yang sedang di-retake: slot di frame bila sudah ditempatkan.
+  String _retakeLabelFor(int shotIndex) {
+    final int slot = _slotAssignments.indexOf(shotIndex);
+    return slot >= 0 ? 'Slot ${slot + 1}' : 'Foto ${shotIndex + 1}';
+  }
+
+  /// Mode "retake banyak foto": tap beberapa slot lalu retake sekaligus.
+  bool _bulkRetakeMode = false;
+  final Set<int> _bulkSlots = <int>{};
+
   /// Foto beda-beda per slot, atau foto yang sama dicetak double.
   BoothPhotoMode _printMode = BoothPhotoMode.different;
 
@@ -243,24 +265,64 @@ class _BoothPageState extends State<BoothPage> {
   }
 
   void _handleConfigChanged() {
-    if (_useCanon) {
-      setState(() {});
-      return;
+    if (!mounted) return;
+
+    void apply() {
+      if (!mounted) return;
+      if (_useCanon) {
+        setState(() {});
+        return;
+      }
+
+      // Restart kamera HANYA bila pilihan kamera/resolusi benar-benar
+      // berubah. `preferredCameraId` bernilai null secara default, jadi
+      // membandingkannya langsung dengan `_activeCameraId` selalu "beda" dan
+      // membuat kamera restart tiap ada notifikasi config (mis. selesai
+      // sinkron frame dari server) -> preview membeku / error.
+      final String? wanted = widget.config.preferredCameraId;
+      final bool cameraChanged =
+          wanted != null && wanted.isNotEmpty && wanted != _activeCameraId;
+      if (cameraChanged || _activePreset != widget.config.resolutionPreset) {
+        _initializeCamera();
+      } else {
+        setState(() {});
+      }
     }
 
-    if (_activeCameraId != widget.config.preferredCameraId ||
-        _activePreset != widget.config.resolutionPreset) {
-      _initializeCamera();
+    // Notifikasi bisa datang di tengah build/finalize; tunda supaya tidak
+    // memanggil setState saat tree terkunci.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => apply());
     } else {
-      setState(() {});
+      apply();
     }
   }
 
+  bool _initializingCamera = false;
+
   Future<void> _initializeCamera() async {
+    // Hindari dua inisialisasi berjalan bersamaan (controller saling dispose).
+    if (_initializingCamera) return;
+    _initializingCamera = true;
+
+    // Lepas controller lama dari UI dulu; dispose dilakukan setelah preview
+    // tidak lagi dipakai widget mana pun.
+    final CameraController? previous = _controller;
     setState(() {
       _isLoading = true;
       _error = null;
+      _controller = null;
     });
+
+    if (previous != null) {
+      // Beri waktu satu-dua frame supaya CameraPreview lama sudah lepas dari
+      // tree sebelum controller-nya dibuang.
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      try {
+        await previous.dispose();
+      } catch (_) {}
+    }
 
     try {
       final List<CameraDescription> cameras = await availableCameras();
@@ -280,7 +342,6 @@ class _BoothPageState extends State<BoothPage> {
         enableAudio: false,
       );
 
-      await _controller?.dispose();
       await controller.initialize();
       final _ZoomBounds zoomBounds = await _readZoomBounds(controller);
       final double minZoomLevel = zoomBounds.minZoomLevel;
@@ -324,6 +385,7 @@ class _BoothPageState extends State<BoothPage> {
         _error = error.toString();
       });
     } finally {
+      _initializingCamera = false;
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -523,6 +585,8 @@ class _BoothPageState extends State<BoothPage> {
       _captureError = null;
       _shots.clear();
       _retakeCount = 0;
+      _retakeTargets = <int>[];
+      _retakeStep = 0;
     });
 
     final int total = _photosTotal;
@@ -591,6 +655,30 @@ class _BoothPageState extends State<BoothPage> {
     }
   }
 
+  /// Melanjutkan preview kamera perangkat yang berhenti/membeku.
+  Future<void> _resumePreviewSafely([CameraController? controller]) async {
+    final CameraController? c = controller ?? _controller;
+    if (_useCanon || c == null || !c.value.isInitialized) return;
+    try {
+      await c.resumePreview();
+    } catch (_) {
+      // Abaikan: tidak semua platform mendukung resume.
+    }
+  }
+
+  /// Pastikan kamera perangkat menampilkan gambar langsung sebelum jepret.
+  /// [restart] = nyalakan ulang kamera (di web, ini menjamin stream segar
+  /// walau preview sebelumnya membeku di foto terakhir).
+  Future<void> _ensureLivePreview({bool restart = false}) async {
+    if (_useCanon) return;
+    final CameraController? c = _controller;
+    if (restart || c == null || !c.value.isInitialized) {
+      await _initializeCamera();
+      return;
+    }
+    await _resumePreviewSafely(c);
+  }
+
   /// Satu kali jepret dari sumber kamera yang aktif.
   Future<BoothShot?> _captureOne() async {
     if (widget.config.playShutterSound) {
@@ -626,6 +714,9 @@ class _BoothPageState extends State<BoothPage> {
 
     try {
       final XFile file = await controller.takePicture();
+      // Di web (Chrome) preview membeku di foto terakhir setelah jepret.
+      // Lanjutkan lagi supaya jepretan berikutnya melihat gambar langsung.
+      unawaited(_resumePreviewSafely(controller));
       // Selalu baca bytes agar bisa ditampilkan di web (file.path = blob URL)
       // dan tetap aman di desktop/mobile.
       Uint8List? bytes;
@@ -643,43 +734,87 @@ class _BoothPageState extends State<BoothPage> {
     }
   }
 
-  /// Retake satu foto tertentu dari halaman hasil.
-  Future<void> _retakeShot(int index) async {
-    if (!widget.config.enableRetakeButton) {
+  /// Retake satu foto tertentu (dari layar compose atau halaman hasil).
+  Future<void> _retakeShot(int index) => _retakeShots(<int>[index]);
+
+  /// Retake satu atau banyak foto sekaligus. Kamera dibuka kembali dan
+  /// tiap foto di [shotIndexes] diambil ulang berurutan (countdown masing-
+  /// masing), lalu kembali ke layar compose dengan slot yang sama.
+  Future<void> _retakeShots(List<int> shotIndexes) async {
+    if (!widget.config.enableRetakeButton || shotIndexes.isEmpty) {
       return;
     }
-    if (!widget.config.unlimitedRetakes &&
-        _retakeCount >= widget.config.retakeLimitPerPhoto) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-              'Batas retake tercapai (${widget.config.retakeLimitPerPhoto}x).'),
-        ),
-      );
-      return;
+    final List<int> targets = shotIndexes.toSet().toList()..sort();
+
+    if (!widget.config.unlimitedRetakes) {
+      final int remaining = widget.config.retakeLimitPerPhoto - _retakeCount;
+      if (remaining < targets.length) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              remaining <= 0
+                  ? 'Batas retake tercapai (${widget.config.retakeLimitPerPhoto}x).'
+                  : 'Sisa jatah retake $remaining kali, kamu memilih ${targets.length} foto.',
+            ),
+          ),
+        );
+        return;
+      }
     }
 
     setState(() {
       _stage = _BoothStage.preview;
       _sessionRunning = true;
-      _retakeCount += 1;
+      _captureError = null;
+      _retakeCount += targets.length;
+      _retakeTargets = targets;
+      _retakeStep = 0;
     });
 
-    await _runCountdown(kBoothShotDelaySeconds);
-    final BoothShot? shot = await _captureOne();
+    // Kamera sempat berhenti di layar compose / membeku setelah jepret
+    // sebelumnya: nyalakan lagi dulu supaya yang tampil gambar langsung.
+    await _ensureLivePreview(restart: kIsWeb);
     if (!mounted) {
       return;
     }
 
-    setState(() {
-      if (shot != null && index < _shots.length) {
-        _shots[index] = shot;
-      } else if (shot != null) {
-        _shots.add(shot);
+    for (int i = 0; i < targets.length; i++) {
+      if (mounted) setState(() => _retakeStep = i);
+      if (i > 0) await _ensureLivePreview();
+      await _runCountdown(kBoothShotDelaySeconds);
+      if (!mounted || !_sessionRunning) {
+        return;
       }
+      final BoothShot? shot = await _captureOne();
+      if (!mounted) {
+        return;
+      }
+      final int index = targets[i];
+      if (shot != null) {
+        setState(() {
+          if (index < _shots.length) {
+            _shots[index] = shot;
+          } else {
+            _shots.add(shot);
+          }
+        });
+      }
+      if (i < targets.length - 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 900));
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
       _sessionRunning = false;
+      _retakeTargets = <int>[];
+      _retakeStep = 0;
+      _bulkRetakeMode = false;
+      _bulkSlots.clear();
       // Kembali ke layar compose supaya user langsung lihat hasil retake di
-      // dalam frame mockup.
+      // dalam frame mockup (slot tetap sama).
       _stage = _BoothStage.compose;
     });
   }
@@ -717,14 +852,33 @@ class _BoothPageState extends State<BoothPage> {
     setState(() {
       _printMode = mode;
       _slotAssignments = next;
-      _selectedSlot = _firstEmptySlot();
+      _selectedSlot = _bulkRetakeMode ? null : _firstEmptySlot();
+      _bulkSlots.clear();
     });
   }
 
   /// Tap sebuah slot untuk memilihnya (highlight); tap lagi untuk unselect.
   void _handleSlotTap(int slotIndex) {
     setState(() {
+      if (_bulkRetakeMode) {
+        // Mode retake banyak foto: hanya slot berisi foto yang bisa dipilih.
+        final bool hasPhoto = slotIndex < _slotAssignments.length &&
+            _slotAssignments[slotIndex] != null;
+        if (hasPhoto && !_bulkSlots.remove(slotIndex)) {
+          _bulkSlots.add(slotIndex);
+        }
+        return;
+      }
       _selectedSlot = _selectedSlot == slotIndex ? null : slotIndex;
+    });
+  }
+
+  void _setBulkRetakeMode(bool on) {
+    setState(() {
+      _bulkRetakeMode = on;
+      _bulkSlots.clear();
+      // Mode biasa: tidak ada slot aktif sampai user memilih.
+      if (on) _selectedSlot = null;
     });
   }
 
@@ -767,6 +921,10 @@ class _BoothPageState extends State<BoothPage> {
       _retakeCount = 0;
       _slotAssignments = <int?>[];
       _selectedSlot = null;
+      _bulkRetakeMode = false;
+      _bulkSlots.clear();
+      _retakeTargets = <int>[];
+      _retakeStep = 0;
       _activeFrame = widget.config.frame;
       _activeFilter = widget.config.filter;
       _resetDesign();
@@ -774,6 +932,7 @@ class _BoothPageState extends State<BoothPage> {
       _sessionRunning = false;
       _uploading = false;
       _lastUploadedSessionId = null;
+      _uploadedShotIndexes = <int>[];
       // Sesi berikutnya wajib bayar lagi.
       _paid = null;
       _paidPhotosSent = false;
@@ -789,14 +948,14 @@ class _BoothPageState extends State<BoothPage> {
   ///
   /// Bila fitur API belum diaktifkan (lihat `PhotoBoothConfig.apiEnabled`)
   /// tombol pemanggilnya tidak akan aktif, jadi method ini aman dipanggil.
-  Future<void> _uploadCurrentSessionToServer() async {
-    if (_uploading || _shots.isEmpty) return;
+  Future<int?> _uploadCurrentSessionToServer() async {
+    if (_uploading || _shots.isEmpty) return null;
 
     final PhotoboothApiService? svc =
         PhotoboothApiService.fromConfig(widget.config);
     if (svc == null) {
       _showApiInactive();
-      return;
+      return null;
     }
 
     setState(() => _uploading = true);
@@ -828,27 +987,31 @@ class _BoothPageState extends State<BoothPage> {
         _showSnack(
           'Tidak ada template aktif di server. Buat dulu di dashboard monolith.',
         );
-        return;
+        return null;
       }
 
       // 2) Siapkan payload photos[]. Tanpa pembayaran, server mewajibkan
       //    jumlah foto == jumlah slot template, jadi kirim foto sesuai urutan
       //    slot. Sesi berbayar mengirim semua jepretan (dibatasi paket).
       final bool slotOrdered = _activeFrame.isRemote && _paid == null;
-      final List<BoothShot> source = slotOrdered
-          ? <BoothShot>[
+      final List<int> sourceIdx = slotOrdered
+          ? <int>[
               for (final int? a in _slotAssignments)
-                if (a != null && a < _shots.length) _shots[a],
+                if (a != null && a < _shots.length) a,
             ]
-          : _shots;
+          : <int>[for (int i = 0; i < _shots.length; i++) i];
+      final List<BoothShot> source = <BoothShot>[
+        for (final int i in sourceIdx) _shots[i],
+      ];
       if (slotOrdered && source.length != _activeFrame.slotCount) {
         _showSnack(
           'Isi semua ${_activeFrame.slotCount} slot template dulu sebelum upload.',
         );
-        return;
+        return null;
       }
 
       final List<PhotoUpload> uploads = <PhotoUpload>[];
+      final List<int> uploadedIdx = <int>[];
       for (int i = 0; i < source.length; i++) {
         final BoothShot shot = source[i];
         final Uint8List? bytes = shot.bytes;
@@ -857,14 +1020,17 @@ class _BoothPageState extends State<BoothPage> {
             'shot_${DateTime.now().millisecondsSinceEpoch}_$i.jpg';
         if (bytes != null) {
           uploads.add(PhotoUpload(filename: filename, bytes: bytes));
+          uploadedIdx.add(sourceIdx[i]);
         } else if (path != null && !kIsWeb) {
           uploads.add(PhotoUpload(filename: filename, filePath: path));
+          uploadedIdx.add(sourceIdx[i]);
         }
       }
+      final Map<String, dynamic> composition = _buildComposition(uploadedIdx);
 
       if (uploads.isEmpty) {
         _showSnack('Tidak ada foto yang bisa dibaca untuk diupload.');
-        return;
+        return null;
       }
 
       // 3) Simpan ke server.
@@ -875,7 +1041,14 @@ class _BoothPageState extends State<BoothPage> {
       final PhotoSessionDto session;
       if (paid != null) {
         if (!_paidPhotosSent) {
-          await svc.addPhotos(sessionId: paid.sessionId, photos: uploads);
+          // Upload sebelumnya bisa saja sudah sampai & tersimpan di server
+          // walau aplikasi menerima timeout. Cek dulu supaya foto tidak
+          // dikirim dobel (server menolak: "Sisa take ... hanya 0 foto").
+          final PhotoSessionDto existing =
+              await svc.getSession(paid.sessionId);
+          if (existing.media.isEmpty) {
+            await svc.addPhotos(sessionId: paid.sessionId, photos: uploads);
+          }
           _paidPhotosSent = true;
         }
         session = await svc.updateSession(
@@ -884,6 +1057,7 @@ class _BoothPageState extends State<BoothPage> {
           filter: filterToApiString(_activeFilter),
           layout: _activeFrame.id,
           takenAt: DateTime.now(),
+          composition: composition,
         );
       } else {
         session = await svc.createSession(
@@ -894,13 +1068,22 @@ class _BoothPageState extends State<BoothPage> {
           layout: _activeFrame.id,
           takenAt: DateTime.now(),
         );
+        // Susunan akhir untuk halaman detail di dashboard (tidak fatal).
+        try {
+          await svc.updateSession(
+            sessionId: session.id,
+            composition: composition,
+          );
+        } catch (_) {}
       }
+      _uploadedShotIndexes = uploadedIdx;
 
-      if (!mounted) return;
+      if (!mounted) return null;
       setState(() => _lastUploadedSessionId = session.id);
       _showSnack(
         'Sesi ${session.sessionCode} tersimpan ke server (id #${session.id}).',
       );
+      return session.id;
     } on ApiException catch (e) {
       _showSnack('Upload gagal: ${e.message}');
     } catch (e) {
@@ -908,6 +1091,235 @@ class _BoothPageState extends State<BoothPage> {
     } finally {
       svc.close();
       if (mounted) setState(() => _uploading = false);
+    }
+
+    return null;
+  }
+
+  /// Index _shots yang terunggah ke server, berurutan sama dengan urutan
+  /// `media` di sesi (dipakai untuk memetakan sel frame -> foto).
+  List<int> _uploadedShotIndexes = <int>[];
+
+  /// Susunan akhir pilihan customer (frame + background + foto per sel +
+  /// filter) supaya dashboard bisa menampilkan ulang hasilnya dan memilih
+  /// filter lain. `cells[i]` = posisi foto di daftar media sesi (-1 = kosong).
+  Map<String, dynamic> _buildComposition(List<int> uploadedShotIndexes) {
+    final BoothFrameOption frame = _styledFrame();
+    final bool hasBg = frame.hasBackground && !frame.isTemplate;
+
+    // Sama dengan _buildFrameSheet: susunan foto mengikuti bentuk area desain.
+    BoothFrameOption inner = frame;
+    if (hasBg) {
+      final FrameBackgroundInfo info = frame.background!;
+      final bool areaLandscape = info.areaH > 0 &&
+          (info.areaW / info.areaH) * frame.backgroundAspect > 1;
+      if (frame.isLandscape != areaLandscape) {
+        inner = frame.withLayout(frame.layout.transposed);
+      }
+    }
+
+    final List<int> cells = <int>[
+      for (final int slot in inner.cellSources(_printMode))
+        (slot < _slotAssignments.length && _slotAssignments[slot] != null)
+            ? uploadedShotIndexes.indexOf(_slotAssignments[slot]!)
+            : -1,
+    ];
+
+    final (int cols, int rows) = switch (inner.layout) {
+      BoothFrameLayout.stripVertical => (1, inner.slotCount),
+      BoothFrameLayout.stripHorizontal => (inner.slotCount, 1),
+      BoothFrameLayout.gridPortrait => (2, inner.slotCount ~/ 2),
+      BoothFrameLayout.gridLandscape => (inner.slotCount ~/ 2, 2),
+      BoothFrameLayout.template => (0, 0),
+    };
+
+    final String copiesDirection = hasBg
+        ? (frame.backgroundAspect > 1 ? 'column' : 'row')
+        : (inner.layout == BoothFrameLayout.stripHorizontal
+            ? 'column'
+            : 'row');
+
+    final int rgb = frame.borderColor.toARGB32() & 0xFFFFFF;
+
+    return <String, dynamic>{
+      'version': 1,
+      'frame_id': frame.id,
+      'frame_name': frame.name,
+      'remote_frame_id': frame.remoteId,
+      'print_mode': _printMode.name,
+      'layout': inner.layout.name,
+      'cols': cols,
+      'rows': rows,
+      'cells': cells,
+      'copies': frame.stripCopies(_printMode),
+      'copies_direction': copiesDirection,
+      'border_color': '#${rgb.toRadixString(16).padLeft(6, '0')}',
+      'filter': filterToApiString(_activeFilter),
+      'background': hasBg
+          ? <String, dynamic>{
+              'id': frame.background!.id,
+              'aspect': frame.backgroundAspect,
+              'area': <String, dynamic>{
+                'x': frame.background!.areaX,
+                'y': frame.background!.areaY,
+                'w': frame.background!.areaW,
+                'h': frame.background!.areaH,
+              },
+            }
+          : null,
+      'template': frame.isTemplate
+          ? <String, dynamic>{
+              'canvas_w': frame.canvasWidth,
+              'canvas_h': frame.canvasHeight,
+              'slots': <Map<String, dynamic>>[
+                for (final BoothSlotRect r in frame.slots)
+                  <String, dynamic>{'x': r.x, 'y': r.y, 'w': r.w, 'h': r.h},
+              ],
+            }
+          : null,
+    };
+  }
+
+  bool _printing = false;
+
+  /// Context strip hasil akhir di layar filter/cetak, untuk memotret mock.
+  /// (Sengaja bukan GlobalKey: GlobalKey bisa memicu error saat subtree
+  /// berpindah/dilepas bersamaan dengan dialog.)
+  BuildContext? _stripContext;
+
+  /// Sembunyikan nomor slot saat memotret mock supaya hasilnya bersih.
+  bool _hideSlotBadges = false;
+
+  String? _lastEmail;
+
+  /// Memotret strip yang tampil di layar jadi PNG (frame + background + foto
+  /// + filter). Null bila layar saat ini tidak menampilkan strip.
+  Future<Uint8List?> _captureStripPng() async {
+    if (!(_stripContext?.mounted ?? false)) return null;
+    setState(() => _hideSlotBadges = true);
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!(_stripContext?.mounted ?? false)) return null;
+      final Object? box = _stripContext?.findRenderObject();
+      if (box is! RenderRepaintBoundary) return null;
+      final ui.Image image = await box.toImage(pixelRatio: 3.0);
+      final ByteData? data =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      return data?.buffer.asUint8List();
+    } catch (e) {
+      debugPrint('Gagal membuat mock strip: $e');
+      return null;
+    } finally {
+      if (mounted) setState(() => _hideSlotBadges = false);
+    }
+  }
+
+  /// Dialog masukkan email. Null = dilewati.
+  Future<String?> _askEmail() {
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext _) => _EmailDialog(initial: _lastEmail),
+    );
+  }
+
+  /// Dipanggil saat pelanggan menekan "Cetak":
+  ///  1. simpan foto ke server + unggah mock strip + catat ke dashboard
+  ///     (menu "Hasil Print"),
+  ///  2. kirim ke printer (snackbar status),
+  ///  3. tanya email, lalu kirim semua foto + mock strip ke email itu.
+  Future<void> _printCurrentSession(String printedMessage) async {
+    if (_printing || _shots.isEmpty) return;
+    setState(() => _printing = true);
+
+    try {
+      if (!widget.config.apiEnabled) {
+        // Mode offline: tidak ada server untuk menyimpan / mencetak.
+        _showSnack(
+            '$printedMessage (API belum aktif, tidak disimpan ke dashboard)');
+        return;
+      }
+
+      // Potret mock selagi strip masih tampil di layar.
+      final Uint8List? mock = await _captureStripPng();
+      if (!mounted) return;
+
+      // 1) Simpan foto ke server bila sesi ini belum pernah diunggah.
+      final int? sessionId =
+          _lastUploadedSessionId ?? await _uploadCurrentSessionToServer();
+      if (sessionId == null) return; // gagal; alasannya sudah ditampilkan.
+
+      final PhotoboothApiService? svc =
+          PhotoboothApiService.fromConfig(widget.config);
+      if (svc == null) {
+        _showApiInactive();
+        return;
+      }
+
+      try {
+        // 2) Mock strip + catat ke dashboard "Hasil Print".
+        if (mock != null) {
+          try {
+            await svc.uploadStrip(sessionId, mock);
+          } catch (e) {
+            _showSnack('Mock strip tidak terunggah: $e');
+          }
+        }
+        try {
+          await svc.markPrinted(
+            sessionId,
+            composition: _uploadedShotIndexes.isEmpty
+                ? null
+                : _buildComposition(_uploadedShotIndexes),
+          );
+        } on ApiException catch (e) {
+          _showSnack('Foto tersimpan, tapi gagal mencatat cetak: ${e.message}');
+        } catch (e) {
+          _showSnack('Foto tersimpan, tapi gagal mencatat cetak: $e');
+        }
+
+        // 3) Kirim ke printer.
+        _showSnack('Mengirim ke ${widget.config.primaryPrinter}...');
+        try {
+          await svc.printSession(
+            sessionId: sessionId,
+            print: true,
+            markPrinted: false,
+          );
+          _showSnack(
+              '$printedMessage Tersimpan juga di dashboard (Hasil Print).');
+        } on ApiException catch (e) {
+          _showSnack('Gagal mencetak: ${e.message}');
+        } catch (e) {
+          _showSnack('Gagal mencetak: $e');
+        }
+
+        // 4) Tanya email, lalu kirim semua foto + mock.
+        if (!mounted) return;
+        final String? email = await _askEmail();
+        if (email == null || !mounted) return;
+        _lastEmail = email;
+
+        _showSnack('Mengirim email ke $email...');
+        try {
+          final PrintResult r = await svc.printSession(
+            sessionId: sessionId,
+            email: email,
+            print: false,
+            markPrinted: false,
+          );
+          _showSnack(r.emailSent ? 'Email terkirim ke $email.' : r.message);
+        } on ApiException catch (e) {
+          _showSnack('Gagal kirim email: ${e.message}');
+        } catch (e) {
+          _showSnack('Gagal kirim email: $e');
+        }
+      } finally {
+        svc.close();
+      }
+    } finally {
+      if (mounted) setState(() => _printing = false);
     }
   }
 
@@ -928,12 +1340,20 @@ class _BoothPageState extends State<BoothPage> {
   void _showSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ------------------------------------------------------------ layar capture
   /// Teks arahan untuk customer selama sesi berjalan.
   String get _capturePrompt {
+    if (_isRetaking) {
+      final String label =
+          _retakeLabelFor(_retakeTargets[_retakeStep.clamp(0, _retakeTargets.length - 1)]);
+      return _countdown > 0
+          ? 'Retake $label — lihat kamera'
+          : 'Foto baru untuk $label';
+    }
     final int total = _photosTotal;
     if (_countdown > 0) {
       return _shots.length >= total - 1
@@ -1081,11 +1501,17 @@ class _BoothPageState extends State<BoothPage> {
                             Positioned(
                               left: 18,
                               top: 18,
-                              child: CaptureProgressPill(
-                                total: total,
-                                taken: taken,
-                                running: running,
-                              ),
+                              child: _isRetaking
+                                  ? _RetakePill(
+                                      label: _retakeTargets.length == 1
+                                          ? 'Retake ${_retakeLabelFor(_retakeTargets.first)}'
+                                          : 'Retake ${_retakeStep + 1} dari ${_retakeTargets.length} • ${_retakeLabelFor(_retakeTargets[_retakeStep.clamp(0, _retakeTargets.length - 1)])}',
+                                    )
+                                  : CaptureProgressPill(
+                                      total: total,
+                                      taken: taken,
+                                      running: running,
+                                    ),
                             ),
                             if (running)
                               Positioned(
@@ -1256,9 +1682,13 @@ class _BoothPageState extends State<BoothPage> {
               children: <Widget>[
                 SectionHeader(
                   title: 'Susun Frame',
-                  subtitle: selected == null
-                      ? 'Pilih $total foto terbaik dari ${_shots.length} jepretan. $filled/$total slot terisi.'
-                      : 'Slot ${selected + 1} dipilih — tap foto di bawah untuk menempatkan.',
+                  subtitle: _bulkRetakeMode
+                      ? (_bulkSlots.isEmpty
+                          ? 'Tap foto di frame yang ingin diulang (bisa lebih dari satu).'
+                          : '${_bulkSlots.length} foto dipilih untuk retake.')
+                      : selected == null
+                          ? 'Pilih $total foto terbaik dari ${_shots.length} jepretan. $filled/$total slot terisi.'
+                          : 'Slot ${selected + 1} dipilih — tap foto di bawah untuk menempatkan.',
                   trailing: StatusBadge(
                     label: '$filled/$total slot',
                     color: allFilled
@@ -1276,6 +1706,13 @@ class _BoothPageState extends State<BoothPage> {
                         selected: _printMode == mode,
                         onSelected: (_) => _switchPrintMode(mode),
                       ),
+                    if (widget.config.enableRetakeButton)
+                      FilterChip(
+                        avatar: const Icon(Icons.checklist_rounded, size: 18),
+                        label: const Text('Retake banyak foto'),
+                        selected: _bulkRetakeMode,
+                        onSelected: _setBulkRetakeMode,
+                      ),
                   ],
                 ),
                 const SizedBox(height: 14),
@@ -1287,6 +1724,7 @@ class _BoothPageState extends State<BoothPage> {
                       shots: _shots,
                       assignments: _slotAssignments,
                       selectedSlot: _selectedSlot,
+                      multiSelected: _bulkSlots,
                       onSlotTap: _handleSlotTap,
                     ),
                   ),
@@ -1343,13 +1781,29 @@ class _BoothPageState extends State<BoothPage> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: selectionHasPhoto &&
-                                widget.config.enableRetakeButton
-                            ? () => _retakeShot(
-                                _slotAssignments[selected]!)
-                            : null,
+                        onPressed: !widget.config.enableRetakeButton
+                            ? null
+                            : _bulkRetakeMode
+                                ? (_bulkSlots.isEmpty
+                                    ? null
+                                    : () => _retakeShots(<int>[
+                                          for (final int slot
+                                              in (_bulkSlots.toList()..sort()))
+                                            if (_slotAssignments[slot] != null)
+                                              _slotAssignments[slot]!,
+                                        ]))
+                                : (selectionHasPhoto
+                                    ? () => _retakeShot(
+                                        _slotAssignments[selected]!)
+                                    : null),
                         icon: const Icon(Icons.refresh),
-                        label: const Text('Retake foto'),
+                        label: Text(
+                          _bulkRetakeMode
+                              ? (_bulkSlots.isEmpty
+                                  ? 'Pilih foto dulu'
+                                  : 'Retake ${_bulkSlots.length} foto')
+                              : 'Retake foto',
+                        ),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1526,14 +1980,22 @@ class _BoothPageState extends State<BoothPage> {
                 const SizedBox(height: 18),
                 Expanded(
                   child: Center(
-                    child: _StripPreview(
-                      frame: _styledFrame(),
-                      printMode: _printMode,
-                      shots: _shots,
-                      assignments: _slotAssignments,
-                      selectedSlot: null,
-                      filter: _activeFilter,
-                      onSlotTap: null,
+                    child: Builder(
+                      builder: (BuildContext stripCtx) {
+                        _stripContext = stripCtx;
+                        return RepaintBoundary(
+                          child: _StripPreview(
+                            frame: _styledFrame(),
+                            printMode: _printMode,
+                            shots: _shots,
+                            assignments: _slotAssignments,
+                            selectedSlot: null,
+                            filter: _activeFilter,
+                            showBadges: !_hideSlotBadges,
+                            onSlotTap: null,
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -1579,16 +2041,11 @@ class _BoothPageState extends State<BoothPage> {
                             ? 'Printing dinonaktifkan'
                             : 'Cetak ke ${widget.config.primaryPrinter}',
                         icon: Icons.print,
-                        onPressed: widget.config.disableAllPrinting
+                        onPressed: widget.config.disableAllPrinting || _printing
                             ? null
-                            : () {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                        'Strip ${_activeFrame.name} + filter ${_activeFilter.label} dikirim ke ${widget.config.primaryPrinter}.'),
-                                  ),
-                                );
-                              },
+                            : () => _printCurrentSession(
+                                  'Strip ${_activeFrame.name} + filter ${_activeFilter.label} dikirim ke ${widget.config.primaryPrinter}.',
+                                ),
                       ),
                     ),
                   ],
@@ -1713,16 +2170,12 @@ class _BoothPageState extends State<BoothPage> {
                             : 'Cetak ke ${widget.config.primaryPrinter}',
                         icon: Icons.print,
                         onPressed: widget.config.disableAllPrinting ||
+                                _printing ||
                                 _shots.isEmpty
                             ? null
-                            : () {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                        '${_shots.length} foto dikirim ke ${widget.config.primaryPrinter}.'),
-                                  ),
-                                );
-                              },
+                            : () => _printCurrentSession(
+                                  '${_shots.length} foto dikirim ke ${widget.config.primaryPrinter}.',
+                                ),
                       ),
                     ),
                   ],
@@ -1744,16 +2197,7 @@ class _BoothPageState extends State<BoothPage> {
         children: <Widget>[
           _ConfiguredBackground(
             imagePath: backgroundPath,
-            fallbackChild: DecoratedBox(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: <Color>[Color(0xFF214F7D), Color(0xFF1B3D60)],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                ),
-              ),
-              child: const SizedBox.expand(),
-            ),
+            fallbackChild: const LandingBackdrop(),
           ),
           DecoratedBox(
             decoration: BoxDecoration(
@@ -1788,57 +2232,29 @@ class _BoothPageState extends State<BoothPage> {
                     //   ),
                     // ),
                     const Spacer(),
-                    Container(
-                      width: 560,
-                      constraints:
-                          const BoxConstraints(maxWidth: double.infinity),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 28,
-                        vertical: 24,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.94),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          _ConfiguredLogo(
-                            imagePath: widget.config.customLogoPath,
-                            boothName: widget.config.boothName,
+                    LayoutBuilder(
+                      builder: (BuildContext context, BoxConstraints c) {
+                        // Kartu menyesuaikan lebar layar kecil.
+                        final double w =
+                            c.maxWidth < 600 ? c.maxWidth : 560.0;
+                        return LandingCard(
+                          width: w,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              _ConfiguredLogo(
+                                imagePath: widget.config.customLogoPath,
+                                boothName: widget.config.boothName,
+                              ),
+                              const SizedBox(height: 22),
+                              LandingTagline(text: widget.config.boothTagline),
+                            ],
                           ),
-                          const SizedBox(height: 10),
-                          Text(
-                            widget.config.boothTagline,
-                            textAlign: TextAlign.center,
-                            style: Theme.of(context)
-                                .textTheme
-                                .headlineSmall
-                                ?.copyWith(
-                                  color: const Color(0xFF2A2A2A),
-                                  fontWeight: FontWeight.w500,
-                                ),
-                          ),
-                        ],
-                      ),
+                        );
+                      },
                     ),
-                    const SizedBox(height: 18),
-                    FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFF2C2C2C),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 42,
-                          vertical: 18,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        textStyle:
-                            Theme.of(context).textTheme.headlineSmall?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                      ),
+                    const SizedBox(height: 28),
+                    LandingStartButton(
                       onPressed: () async {
                         // Verifikasi pembayaran (scan QR) sebelum booth jalan.
                         if (!await _ensurePaid() || !mounted) {
@@ -1848,7 +2264,6 @@ class _BoothPageState extends State<BoothPage> {
                           _stage = _BoothStage.frameSelection;
                         });
                       },
-                      child: const Text('Tap to Start!'),
                     ),
                     const Spacer(),
                   ],
@@ -1884,16 +2299,7 @@ class _BoothPageState extends State<BoothPage> {
         children: <Widget>[
           _ConfiguredBackground(
             imagePath: backgroundPath,
-            fallbackChild: DecoratedBox(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: <Color>[Color(0xFF214F7D), Color(0xFF1B3D60)],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                ),
-              ),
-              child: const SizedBox.expand(),
-            ),
+            fallbackChild: const LandingBackdrop(),
           ),
           DecoratedBox(
             decoration: BoxDecoration(
@@ -2911,42 +3317,7 @@ class _FallbackLogo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 320,
-      height: 320,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          colors: <Color>[Color(0xFF215A97), Color(0xFFF59A27)],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-        ),
-        border: Border.all(
-          color: const Color(0xFF0F4E87),
-          width: 6,
-        ),
-        boxShadow: const <BoxShadow>[
-          BoxShadow(
-            color: Color(0x22000000),
-            blurRadius: 18,
-            offset: Offset(0, 10),
-          ),
-        ],
-      ),
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(
-            boothName,
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                  color: const Color(0xFFFFC156),
-                  fontWeight: FontWeight.w900,
-                ),
-          ),
-        ),
-      ),
-    );
+    return DefaultBoothLogo(boothName: boothName, size: 300);
   }
 }
 
@@ -2976,6 +3347,127 @@ class _StatusMessage extends StatelessWidget {
             Text(message, textAlign: TextAlign.center),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Dialog "Kirim ke email?". Controller dimiliki & dibuang oleh State dialog
+/// sendiri (bukan dibuang pemanggil sementara animasi tutup masih berjalan).
+class _EmailDialog extends StatefulWidget {
+  const _EmailDialog({this.initial});
+
+  final String? initial;
+
+  @override
+  State<_EmailDialog> createState() => _EmailDialogState();
+}
+
+class _EmailDialogState extends State<_EmailDialog> {
+  static final RegExp _pattern = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]{2,}$');
+
+  late final TextEditingController _input =
+      TextEditingController(text: widget.initial ?? '');
+  String? _error;
+  bool _closing = false;
+
+  @override
+  void dispose() {
+    _input.dispose();
+    super.dispose();
+  }
+
+  void _close([String? value]) {
+    if (_closing) return;
+    _closing = true;
+    FocusManager.instance.primaryFocus?.unfocus();
+    // Tutup di frame berikutnya, bukan di tengah penanganan event input.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop(value);
+    });
+  }
+
+  void _submit() {
+    final String v = _input.text.trim();
+    if (!_pattern.hasMatch(v)) {
+      setState(() => _error = 'Alamat email tidak valid');
+      return;
+    }
+    _close(v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Kirim ke email?'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              'Semua foto dan mock hasil strip akan dikirim ke email ini.',
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _input,
+              autofocus: true,
+              keyboardType: TextInputType.emailAddress,
+              decoration: InputDecoration(
+                labelText: 'Alamat email',
+                hintText: 'nama@email.com',
+                errorText: _error,
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: _close,
+          child: const Text('Lewati'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.send_rounded),
+          label: const Text('Kirim'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Label di layar kamera saat retake: menunjukkan slot yang sedang diulang.
+class _RetakePill extends StatelessWidget {
+  const _RetakePill({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppTheme.danger.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white38),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          const Icon(Icons.refresh_rounded, size: 16, color: Colors.white),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+              fontSize: 13,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3065,7 +3557,9 @@ class _StripPreview extends StatelessWidget {
     required this.shots,
     required this.assignments,
     required this.selectedSlot,
+    this.multiSelected = const <int>{},
     this.filter = BoothFilter.none,
+    this.showBadges = true,
     required this.onSlotTap,
   });
 
@@ -3074,7 +3568,13 @@ class _StripPreview extends StatelessWidget {
   final List<BoothShot> shots;
   final List<int?> assignments;
   final int? selectedSlot;
+
+  /// Slot yang dipilih untuk retake banyak foto (mode bulk).
+  final Set<int> multiSelected;
   final BoothFilter filter;
+
+  /// Nomor slot (1, 2, ...) di pojok foto; dimatikan saat memotret mock.
+  final bool showBadges;
   final ValueChanged<int>? onSlotTap;
 
   @override
@@ -3131,6 +3631,7 @@ class _StripPreview extends StatelessWidget {
         ? shots[shotIndex]
         : null;
     final bool selected = selectedSlot == slotIndex;
+    final bool bulk = multiSelected.contains(slotIndex);
 
     Widget content;
     if (shot == null) {
@@ -3186,8 +3687,12 @@ class _StripPreview extends StatelessWidget {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(6),
           border: Border.all(
-            color: selected ? frame.borderColor : const Color(0x22000000),
-            width: selected ? 3 : 1,
+            color: bulk
+                ? AppTheme.danger
+                : selected
+                    ? frame.borderColor
+                    : const Color(0x22000000),
+            width: (selected || bulk) ? 3 : 1,
           ),
         ),
         child: ClipRRect(
@@ -3196,9 +3701,10 @@ class _StripPreview extends StatelessWidget {
             fit: StackFit.expand,
             children: <Widget>[
               content,
-              Positioned(
-                left: 6,
-                top: 6,
+              if (showBadges)
+                Positioned(
+                  left: 6,
+                  top: 6,
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 6, vertical: 2),
@@ -3216,7 +3722,42 @@ class _StripPreview extends StatelessWidget {
                   ),
                 ),
               ),
-              if (selected)
+              if (bulk)
+                Positioned.fill(
+                  child: ColoredBox(
+                    color: AppTheme.danger.withValues(alpha: 0.18),
+                  ),
+                ),
+              if (bulk)
+                Positioned(
+                  right: 6,
+                  top: 6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: AppTheme.danger,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(Icons.refresh, size: 10, color: Colors.white),
+                        SizedBox(width: 3),
+                        Text(
+                          'RETAKE',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              if (selected && !bulk)
                 Positioned(
                   right: 6,
                   top: 6,

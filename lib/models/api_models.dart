@@ -53,7 +53,7 @@ class ServerConfigDto {
     final Object? rawWarnings = json['warnings'];
     return ServerConfigDto(
       requirePayment: _asBool(json['require_payment'], defaultValue: true),
-      shotsPerSession: (json['shots_per_session'] as num?)?.toInt(),
+      shotsPerSession: _asIntOrNull(json['shots_per_session']),
       warnings: rawWarnings is List
           ? rawWarnings.map((Object? w) => w.toString()).toList(growable: false)
           : const <String>[],
@@ -79,7 +79,7 @@ class BoothDto {
 
   factory BoothDto.fromJson(Map<String, dynamic> json) {
     return BoothDto(
-      id: (json['id'] as num).toInt(),
+      id: _asInt(json['id']),
       name: json['name']?.toString() ?? 'Booth',
       slug: json['slug']?.toString(),
       location: json['location']?.toString(),
@@ -148,7 +148,7 @@ class PhotoFrameDto {
     }
 
     return PhotoFrameDto(
-      id: (json['id'] as num).toInt(),
+      id: _asInt(json['id']),
       name: json['name']?.toString() ?? 'Template',
       category: json['category']?.toString() ?? 'All',
       scope: json['scope']?.toString() ?? 'Generic',
@@ -185,12 +185,12 @@ class MediaDto {
 
   factory MediaDto.fromJson(Map<String, dynamic> json) {
     return MediaDto(
-      id: (json['id'] as num).toInt(),
-      sessionId: (json['session_id'] as num?)?.toInt() ?? 0,
+      id: _asInt(json['id']),
+      sessionId: _asIntOrNull(json['session_id']) ?? 0,
       type: json['type']?.toString() ?? 'photo',
       fileName: json['file_name']?.toString() ?? '',
       path: json['path']?.toString() ?? '',
-      size: (json['size'] as num?)?.toInt() ?? 0,
+      size: _asIntOrNull(json['size']) ?? 0,
     );
   }
 
@@ -266,17 +266,17 @@ class PhotoSessionDto {
     }
 
     return PhotoSessionDto(
-      id: (json['id'] as num).toInt(),
-      boothId: (json['booth_id'] as num?)?.toInt() ?? 0,
-      photoFrameId: (json['photo_frame_id'] as num?)?.toInt(),
+      id: _asInt(json['id']),
+      boothId: _asIntOrNull(json['booth_id']) ?? 0,
+      photoFrameId: _asIntOrNull(json['photo_frame_id']),
       sessionCode: json['session_code']?.toString() ?? '',
       customerName: json['customer_name']?.toString(),
       layout: json['layout']?.toString(),
       grid: json['grid']?.toString(),
       filter: json['filter']?.toString(),
       email: json['email']?.toString(),
-      totalFiles: (json['total_files'] as num?)?.toInt() ?? 0,
-      totalSize: (json['total_size'] as num?)?.toInt() ?? 0,
+      totalFiles: _asIntOrNull(json['total_files']) ?? 0,
+      totalSize: _asIntOrNull(json['total_size']) ?? 0,
       takenAt: takenAt,
       booth: booth,
       photoFrame: frame,
@@ -320,12 +320,23 @@ class PhotoSessionPage {
 
     return PhotoSessionPage(
       data: data,
-      currentPage: (pager['current_page'] as num?)?.toInt() ?? 1,
-      lastPage: (pager['last_page'] as num?)?.toInt() ?? 1,
-      total: (pager['total'] as num?)?.toInt() ?? data.length,
+      currentPage: _asInt(pager['current_page'], 1),
+      lastPage: _asInt(pager['last_page'], 1),
+      total: _asInt(pager['total'], data.length),
     );
   }
 }
+
+/// Laravel mengirim kolom DECIMAL (mis. `size`, `total_size`) sebagai String
+/// seperti "0.00", jadi cast langsung `as num` akan melempar TypeError.
+int? _asIntOrNull(Object? value) {
+  if (value is num) return value.toInt();
+  if (value is String) return num.tryParse(value.trim())?.toInt();
+  return null;
+}
+
+int _asInt(Object? value, [int fallback = 0]) =>
+    _asIntOrNull(value) ?? fallback;
 
 bool _asBool(Object? value, {bool defaultValue = false}) {
   if (value is bool) return value;

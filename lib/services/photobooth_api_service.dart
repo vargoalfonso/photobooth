@@ -332,8 +332,10 @@ class PhotoboothApiService {
     String? layout,
     String? filter,
     DateTime? takenAt,
+    Map<String, dynamic>? composition,
   }) async {
     final Map<String, dynamic> body = <String, dynamic>{
+      if (composition != null) 'composition': composition,
       if (photoFrameId != null) 'photo_frame_id': photoFrameId,
       if (customerName != null) 'customer_name': customerName,
       if (layout != null) 'layout': layout,
@@ -358,21 +360,59 @@ class PhotoboothApiService {
     await _client.delete('photo-sessions/$sessionId/photos/$mediaId');
   }
 
-  /// POST /api/photo-sessions/{id}/print — kirim email + trigger printer
-  /// command (bila server dikonfigurasi PHOTOBOOTH_PRINTER_COMMAND).
+  /// POST /api/photo-sessions/{id}/print — jalankan printer di server dan/atau
+  /// kirim email (semua foto + mock strip dalam ZIP, mock juga tampil di isi
+  /// email). [email] null = hanya print; [print] false = hanya email.
+  /// [markPrinted] false bila kiosk sudah memanggil [markPrinted] sendiri.
   Future<PrintResult> printSession({
     required int sessionId,
-    required String email,
+    String? email,
+    bool print = true,
+    bool markPrinted = true,
   }) async {
     final Map<String, dynamic> raw = await _client.postJson(
       'photo-sessions/$sessionId/print',
-      body: <String, dynamic>{'email': email},
+      body: <String, dynamic>{
+        if (email != null && email.isNotEmpty) 'email': email,
+        'print': print,
+        'mark_printed': markPrinted,
+      },
     );
     return PrintResult(
       message: raw['message']?.toString() ?? 'Print job dikirim.',
       emailSent: raw['email_sent'] == true,
       printDispatched: raw['print_dispatched'] == true,
     );
+  }
+
+  /// POST /api/photo-sessions/{id}/strip — unggah gambar mock strip (hasil
+  /// akhir: frame + background + foto + filter) dalam format PNG.
+  Future<void> uploadStrip(int sessionId, Uint8List pngBytes) async {
+    await _client.postMultipart(
+      'photo-sessions/$sessionId/strip',
+      files: <ApiFileUpload>[
+        ApiFileUpload(
+          fieldName: 'strip',
+          filename: 'strip-mock.png',
+          bytes: pngBytes,
+        ),
+      ],
+    );
+  }
+
+  /// POST /api/photo-sessions/{id}/printed — tandai sesi sudah dicetak dari
+  /// kiosk, supaya muncul di menu "Hasil Print" pada dashboard Laravel.
+  Future<PhotoSessionDto> markPrinted(
+    int sessionId, {
+    Map<String, dynamic>? composition,
+  }) async {
+    final Map<String, dynamic> raw = await _client.postJson(
+      'photo-sessions/$sessionId/printed',
+      body: composition == null
+          ? null
+          : <String, dynamic>{'composition': composition},
+    );
+    return _extractSession(raw);
   }
 
   // ------------------------------------------- helper: extract session json

@@ -141,7 +141,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   int extraPrintDiscountThreshold = 3;
   int maximumExtraPrints = 10;
   bool enableExtraPrintPayment = false;
-  String boothName = 'VARGOBOOTH';
+  String boothName = 'PHOTOBOOTH';
   String boothTagline = 'learn fun with me';
   String adminPin = '1234';
   String? customLogoPath;
