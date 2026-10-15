@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../models/api_models.dart';
 import '../models/booth_models.dart';
+import '../theme/app_theme.dart';
 
 class PhotoBoothConfig extends ChangeNotifier {
   // ------------------------------------------------------- Monolith API
@@ -183,7 +184,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   String appearanceButton2TextHex = '#242424';
   String appearanceButton3BackgroundHex = '#2D77B4';
   String appearanceButton3TextHex = '#EDEDED';
-  String appearanceFontFamily = 'Josefin Sans (Default)';
+  String appearanceFontFamily = AppTheme.fontPlayful;
   String? customBackgroundPath;
   String? customFontPath;
   String? customHomePagePath;

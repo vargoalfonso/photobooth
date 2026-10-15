@@ -115,7 +115,7 @@ class _LuminashBoothAppState extends State<LuminashBoothApp> {
         return MaterialApp(
           title: 'Luminash Booth',
           debugShowCheckedModeBanner: false,
-          theme: AppTheme.build(),
+          theme: AppTheme.build(fontChoice: _config.appearanceFontFamily),
           onGenerateRoute: _buildRoute,
           initialRoute: '/',
         );

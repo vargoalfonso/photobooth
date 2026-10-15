@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../state/photo_booth_config.dart';
 import '../utils/file_picker_helper.dart';
+import '../theme/app_theme.dart';
 
 class AppearancePage extends StatefulWidget {
   const AppearancePage({
@@ -25,13 +26,7 @@ class _AppearancePageState extends State<AppearancePage> {
     'Custom Loading Media',
   ];
 
-  static const List<String> _fontFamilies = <String>[
-    'Josefin Sans (Default)',
-    'Roboto',
-    'Poppins',
-    'Montserrat',
-    'Open Sans',
-  ];
+  static const List<String> _fontFamilies = AppTheme.fontChoices;
 
   String _activeTab = 'Color Settings';
 
