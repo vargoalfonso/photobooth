@@ -3,12 +3,13 @@ import 'package:flutter/material.dart';
 
 import '../models/api_models.dart';
 import '../models/booth_models.dart';
+import '../theme/app_theme.dart';
 
 class PhotoBoothConfig extends ChangeNotifier {
   // ------------------------------------------------------- Monolith API
   /// Base URL API monolith Laravel (mis. `http://127.0.0.1:8000/api`).
   /// Boleh diisi tanpa `/api` — client akan menambahkan otomatis.
-  String apiBaseUrl = 'http://127.0.0.1:8000/api';
+  String apiBaseUrl = 'http://43.163.90.58:8000/api';
 
   /// Token opsional (Bearer) untuk API monolith. Kosongkan bila endpoint
   /// tidak butuh autentikasi (sesuai `routes/api.php` yang public).
@@ -183,7 +184,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   String appearanceButton2TextHex = '#242424';
   String appearanceButton3BackgroundHex = '#2D77B4';
   String appearanceButton3TextHex = '#EDEDED';
-  String appearanceFontFamily = 'Josefin Sans (Default)';
+  String appearanceFontFamily = AppTheme.fontPlayful;
   String? customBackgroundPath;
   String? customFontPath;
   String? customHomePagePath;

@@ -126,7 +126,7 @@ class MonolithApiClient {
       trimmed = trimmed.substring(0, trimmed.length - 1);
     }
     if (trimmed.isEmpty) {
-      return 'http://127.0.0.1:8000/api';
+      return 'http://43.163.90.58:8000/api';
     }
     // Kalau user cuma masukkan `http://host` tanpa `/api`, tambahkan.
     if (!trimmed.endsWith('/api')) {

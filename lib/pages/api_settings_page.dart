@@ -187,7 +187,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                       controller: _baseUrlCtrl,
                       decoration: const InputDecoration(
                         labelText: 'Base URL',
-                        hintText: 'http://127.0.0.1:8000/api',
+                        hintText: 'http://43.163.90.58:8000/api',
                         border: OutlineInputBorder(),
                       ),
                       keyboardType: TextInputType.url,

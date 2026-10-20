@@ -28,6 +28,38 @@ class AppTheme {
   static const Color textSecondary = Color(0xFFA6B0C8);
   static const Color textMuted = Color(0xFF6E7A96);
 
+  // Typography: Fredoka (rounded, bouncy) untuk judul & tombol,
+  // Nunito (rounded, ramah) untuk teks biasa. Keduanya dibundel di assets/fonts.
+  static const String displayFont = 'Fredoka';
+  static const String bodyFont = 'Nunito';
+
+  /// Pilihan font untuk dropdown Typography di halaman Appearance.
+  static const String fontPlayful = 'Fredoka + Nunito (Playful)';
+  static const String fontFredoka = 'Fredoka';
+  static const String fontNunito = 'Nunito';
+  static const String fontSystem = 'Roboto (Classic)';
+  static const List<String> fontChoices = <String>[
+    fontPlayful,
+    fontFredoka,
+    fontNunito,
+    fontSystem,
+  ];
+
+  /// (body, display) font family untuk satu pilihan.
+  static (String, String) _resolveFonts(String choice) {
+    switch (choice) {
+      case fontFredoka:
+        return (displayFont, displayFont);
+      case fontNunito:
+        return (bodyFont, bodyFont);
+      case fontSystem:
+        return ('Roboto', 'Roboto');
+      case fontPlayful:
+      default:
+        return (bodyFont, displayFont);
+    }
+  }
+
   static const double radiusSm = 12;
   static const double radiusMd = 18;
   static const double radiusLg = 26;
@@ -61,7 +93,8 @@ class AppTheme {
     ];
   }
 
-  static ThemeData build() {
+  static ThemeData build({String fontChoice = fontPlayful}) {
+    final (String body, String display) = _resolveFonts(fontChoice);
     final ColorScheme scheme = ColorScheme.fromSeed(
       seedColor: accent,
       brightness: Brightness.dark,
@@ -80,6 +113,7 @@ class AppTheme {
         .apply(
           bodyColor: textPrimary,
           displayColor: textPrimary,
+          fontFamily: body,
         );
 
     return ThemeData(
@@ -89,36 +123,63 @@ class AppTheme {
       colorScheme: scheme,
       canvasColor: bgBase,
       splashFactory: InkSparkle.splashFactory,
-      fontFamily: 'Roboto',
+      fontFamily: body,
       textTheme: text.copyWith(
-        displaySmall: text.displaySmall?.copyWith(
+        displayLarge: text.displayLarge?.copyWith(
+          fontFamily: display,
           fontWeight: FontWeight.w700,
-          letterSpacing: -0.8,
+        ),
+        displayMedium: text.displayMedium?.copyWith(
+          fontFamily: display,
+          fontWeight: FontWeight.w700,
+        ),
+        displaySmall: text.displaySmall?.copyWith(
+          fontFamily: display,
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.2,
+        ),
+        headlineLarge: text.headlineLarge?.copyWith(
+          fontFamily: display,
+          fontWeight: FontWeight.w700,
         ),
         headlineMedium: text.headlineMedium?.copyWith(
+          fontFamily: display,
           fontWeight: FontWeight.w700,
-          letterSpacing: -0.5,
+          letterSpacing: -0.1,
         ),
         headlineSmall: text.headlineSmall?.copyWith(
+          fontFamily: display,
           fontWeight: FontWeight.w600,
         ),
-        titleMedium: text.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+        titleLarge: text.titleLarge?.copyWith(
+          fontFamily: display,
+          fontWeight: FontWeight.w600,
+        ),
+        titleMedium: text.titleMedium?.copyWith(
+          fontFamily: display,
+          fontWeight: FontWeight.w600,
+        ),
+        titleSmall: text.titleSmall?.copyWith(
+          fontFamily: display,
+          fontWeight: FontWeight.w500,
+        ),
         bodyMedium: text.bodyMedium?.copyWith(color: textSecondary),
         labelLarge: text.labelLarge?.copyWith(
+          fontFamily: display,
           fontWeight: FontWeight.w600,
-          letterSpacing: 0.2,
+          letterSpacing: 0.3,
         ),
       ),
-      appBarTheme: const AppBarTheme(
+      appBarTheme: AppBarTheme(
         backgroundColor: Colors.transparent,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         centerTitle: false,
         titleTextStyle: TextStyle(
+          fontFamily: display,
           color: textPrimary,
-          fontSize: 20,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -0.3,
+          fontSize: 22,
+          fontWeight: FontWeight.w600,
         ),
         iconTheme: IconThemeData(color: textPrimary),
       ),
@@ -145,9 +206,10 @@ class AppTheme {
           backgroundColor: accent,
           foregroundColor: const Color(0xFF1A1406),
           padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
-          textStyle: const TextStyle(
-            fontWeight: FontWeight.w700,
-            fontSize: 15,
+          textStyle: TextStyle(
+            fontFamily: display,
+            fontWeight: FontWeight.w600,
+            fontSize: 16,
             letterSpacing: 0.2,
           ),
           shape: RoundedRectangleBorder(
@@ -160,7 +222,7 @@ class AppTheme {
           foregroundColor: textPrimary,
           side: const BorderSide(color: strokeStrong),
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+          textStyle: TextStyle(fontFamily: display, fontWeight: FontWeight.w600),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(radiusMd),
           ),
@@ -169,7 +231,7 @@ class AppTheme {
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
           foregroundColor: accent,
-          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+          textStyle: TextStyle(fontFamily: display, fontWeight: FontWeight.w600),
         ),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(
