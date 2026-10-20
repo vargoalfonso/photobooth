@@ -9,7 +9,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   // ------------------------------------------------------- Monolith API
   /// Base URL API monolith Laravel (mis. `http://127.0.0.1:8000/api`).
   /// Boleh diisi tanpa `/api` — client akan menambahkan otomatis.
-  String apiBaseUrl = 'http://127.0.0.1:8000/api';
+  String apiBaseUrl = 'http://43.163.90.58:8000/api';
 
   /// Token opsional (Bearer) untuk API monolith. Kosongkan bila endpoint
   /// tidak butuh autentikasi (sesuai `routes/api.php` yang public).
