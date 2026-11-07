@@ -1,3 +1,5 @@
+import 'package:camera/camera.dart'
+    show CameraDescription, CameraException, availableCameras;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -31,6 +33,8 @@ class _CanonSetupPageState extends State<CanonSetupPage> {
   late final TextEditingController _folderController;
   late final TextEditingController _dllController;
   bool _busy = false;
+  bool _detecting = false;
+  CanonDetectResult? _detectResult;
 
   @override
   void initState() {
@@ -85,6 +89,79 @@ class _CanonSetupPageState extends State<CanonSetupPage> {
     }
     setState(() => _dllController.text = path);
     widget.canon.setSdkDllPath(path);
+  }
+
+  /// Deteksi webcam lewat browser/perangkat (dipakai saat Canon tidak
+  /// didukung, mis. di Flutter Web). Browser akan meminta izin kamera.
+  Future<CanonDetectResult> _detectWebcams() async {
+    try {
+      final List<CameraDescription> cameras =
+          await availableCameras().timeout(const Duration(seconds: 15));
+      if (cameras.isEmpty) {
+        return const CanonDetectResult(
+          found: false,
+          message: 'Tidak ada kamera terdeteksi di perangkat ini. Pastikan '
+              'webcam terpasang dan tidak dipakai aplikasi lain.',
+        );
+      }
+      final String names = cameras
+          .map((CameraDescription c) =>
+              c.name.trim().isEmpty ? 'Kamera tanpa nama' : c.name.trim())
+          .join('\n• ');
+      final bool hasCanon = cameras.any((CameraDescription c) {
+        final String n = c.name.toLowerCase();
+        return n.contains('canon') || n.contains('eos');
+      });
+      final String hint = hasCanon
+          ? ''
+          : '\n\nKamera Canon belum muncul. Kamera Canon yang dicolok lewat '
+              'USB biasanya mode transfer foto (PTP), bukan webcam, jadi '
+              'tidak terlihat di browser. Pasang Canon EOS Webcam Utility '
+              'agar muncul sebagai "EOS Webcam Utility", atau jalankan '
+              'aplikasi di Windows untuk kontrol USB langsung.';
+      return CanonDetectResult(
+        found: true,
+        count: cameras.length,
+        message: '${cameras.length} kamera terdeteksi:\n• $names$hint',
+      );
+    } on CameraException catch (e) {
+      return CanonDetectResult(
+        found: false,
+        message: 'Kamera tidak bisa diakses (${e.code}). Izinkan akses kamera '
+            'di browser (ikon gembok di address bar), lalu coba lagi.',
+      );
+    } catch (e) {
+      return CanonDetectResult(
+        found: false,
+        message: 'Gagal mendeteksi kamera: $e',
+      );
+    }
+  }
+
+  Future<void> _detectCamera() async {
+    setState(() {
+      _detecting = true;
+      _detectResult = null;
+    });
+    await _applyEndpoint();
+    // Loading minimal 700 ms supaya indikator sempat terlihat.
+    final Future<void> minDelay =
+        Future<void>.delayed(const Duration(milliseconds: 700));
+    final CanonDetectResult result = widget.canon.isPlatformSupported
+        ? await widget.canon.detectCamera()
+        : await _detectWebcams();
+    await minDelay;
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _detecting = false;
+      _detectResult = result;
+    });
+    _snack(
+      result.found ? 'Kamera terdeteksi.' : result.message,
+      error: !result.found,
+    );
   }
 
   Future<void> _testConnection() async {
@@ -380,16 +457,29 @@ class _CanonSetupPageState extends State<CanonSetupPage> {
               _buildDllRow(),
             ],
           ],
-          if (supported) ...<Widget>[
-            const SizedBox(height: 16),
-            Row(
-              children: <Widget>[
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              OutlinedButton.icon(
+                onPressed: (_busy || _detecting) ? null : _detectCamera,
+                icon: _detecting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.search),
+                label: Text(_detecting ? 'Mendeteksi...' : 'Deteksi Kamera'),
+              ),
+              if (supported) ...<Widget>[
                 GradientButton(
                   label: _busy ? 'Menghubungkan...' : 'Cek Koneksi',
                   icon: Icons.sensors,
-                  onPressed: _busy ? null : _testConnection,
+                  onPressed: (_busy || _detecting) ? null : _testConnection,
                 ),
-                const SizedBox(width: 12),
                 OutlinedButton.icon(
                   onPressed: canon.state.isConnected
                       ? () => canon.disconnect()
@@ -398,6 +488,43 @@ class _CanonSetupPageState extends State<CanonSetupPage> {
                   label: const Text('Disconnect'),
                 ),
               ],
+            ],
+          ),
+          if (_detecting) ...<Widget>[
+            const SizedBox(height: 14),
+            Row(
+              children: <Widget>[
+                const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    supported
+                        ? 'Mendeteksi kamera Canon...'
+                        : 'Mendeteksi kamera... izinkan akses kamera jika '
+                            'browser meminta.',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: AppTheme.textSecondary,
+                        ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: const LinearProgressIndicator(minHeight: 4),
+            ),
+          ] else if (_detectResult != null) ...<Widget>[
+            const SizedBox(height: 12),
+            _InfoBox(
+              icon: _detectResult!.found
+                  ? Icons.check_circle_outline
+                  : Icons.error_outline,
+              text: _detectResult!.message,
             ),
           ],
           const SizedBox(height: 8),

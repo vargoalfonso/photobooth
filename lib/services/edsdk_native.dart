@@ -27,13 +27,17 @@ import 'edsdk_types.dart';
 const int _kPropProductName = 0x00000002;
 const int _kPropFirmwareVersion = 0x00000007;
 const int _kPropBatteryLevel = 0x00000008;
-const int _kPropSaveTo = 0x0000000B;
+// Status verifikasi konstanta:
+//  [OK]  dicocokkan dengan file contoh resmi Canon (EDSDKType.pas/EDSDKError.pas)
+//  [HDR] berasal dari pengetahuan header EDSDKTypes.h, BELUM dicocokkan dengan
+//        file header asli. Cocokkan begitu SDK Canon tersedia.
+const int _kPropSaveTo = 0x0000000B; // [HDR]
 const int _kPropBodyIDEx = 0x00000015;
 const int _kPropWhiteBalance = 0x00000106;
-const int _kPropAv = 0x00000402;
-const int _kPropTv = 0x00000403;
-const int _kPropIsoSpeed = 0x00000404;
-const int _kPropLensName = 0x00000409;
+const int _kPropIsoSpeed = 0x00000402; // [HDR] (urutan: ISO 402, Av 405, Tv 406)
+const int _kPropAv = 0x00000405; // [HDR]
+const int _kPropTv = 0x00000406; // [HDR]
+const int _kPropLensName = 0x0000040D; // [OK] kEdsPropID_LensName
 const int _kPropEvfOutputDevice = 0x00000500;
 const int _kPropEvfMode = 0x00000501;
 

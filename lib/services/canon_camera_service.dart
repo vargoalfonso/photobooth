@@ -118,6 +118,25 @@ class CanonCaptureResult {
   final String? message;
 }
 
+/// Hasil satu kali deteksi kamera (tombol "Deteksi Kamera").
+class CanonDetectResult {
+  const CanonDetectResult({
+    required this.found,
+    required this.message,
+    this.count = 0,
+  });
+
+  /// True bila minimal satu kamera terlihat / service kamera merespons.
+  final bool found;
+
+  /// Jumlah kamera yang terlihat di USB (mode USB Langsung). 0 untuk mode
+  /// jaringan.
+  final int count;
+
+  /// Pesan siap tampil ke operator.
+  final String message;
+}
+
 /// Service tunggal untuk mengontrol Canon EOS R100.
 ///
 /// Semua request memakai `HttpClient` dari `dart:io` sehingga tidak butuh
@@ -610,6 +629,104 @@ class CanonCameraService extends ChangeNotifier {
         return ccapi ? '/ver100/shooting/settings/wb' : '/settings/wb';
       case _CanonEndpoint.lastContent:
         return ccapi ? '/ver100/contents' : '/capture/last';
+    }
+  }
+
+  // --------------------------------------------------------------- detect
+  /// Mengecek apakah kamera ada, TANPA membuka sesi dan tanpa mengubah state
+  /// koneksi. Aman ditekan kapan saja untuk uji cepat (kabel/daya/driver).
+  ///
+  /// - USB Langsung (EDSDK): memuat EDSDK.dll lalu menghitung kamera di USB.
+  /// - Bridge / CCAPI: mencoba menjangkau service kamera di host:port.
+  Future<CanonDetectResult> detectCamera() async {
+    if (!isPlatformSupported) {
+      _addLog('Deteksi: $_webUnsupportedMessage');
+      return const CanonDetectResult(
+        found: false,
+        message: _webUnsupportedMessage,
+      );
+    }
+
+    if (_isCapturing) {
+      return const CanonDetectResult(
+        found: true,
+        message: 'Kamera sedang memotret, coba lagi sebentar.',
+      );
+    }
+
+    if (_mode == CanonConnectionMode.edsdkDirect) {
+      return _detectEdsdk();
+    }
+
+    // Mode jaringan: cukup cek service-nya menjawab.
+    _addLog('Deteksi: cek $baseUrl');
+    try {
+      final Map<String, dynamic> info =
+          await _getJson(_pathFor(_CanonEndpoint.deviceInformation))
+              .timeout(const Duration(seconds: 5));
+      final String model =
+          '${info['productname'] ?? info['model'] ?? 'Kamera Canon'}';
+      _addLog('Deteksi: $model merespons di $baseUrl');
+      return CanonDetectResult(
+        found: true,
+        count: 1,
+        message: '$model terdeteksi di $_host:$_port.',
+      );
+    } catch (error) {
+      final String msg = _friendlyError(error);
+      _addLog('Deteksi: kamera tidak ditemukan ($error)');
+      return CanonDetectResult(found: false, message: msg);
+    }
+  }
+
+  Future<CanonDetectResult> _detectEdsdk() async {
+    if (kIsWeb || !(Platform.isWindows || debugAllowNonWindowsEdsdk)) {
+      const String msg = 'Mode USB Langsung hanya tersedia di Windows. '
+          'Pilih mode bridge / CCAPI di platform ini.';
+      _addLog('Deteksi: $msg');
+      return const CanonDetectResult(found: false, message: msg);
+    }
+
+    try {
+      final EdsdkNative sdk = _edsdk ??= EdsdkNative();
+      if (!sdk.isLoaded) {
+        final String? dll = EdsdkNative.locateDll(_sdkDllPath);
+        if (dll == null) {
+          const String msg =
+              'EDSDK.dll tidak ditemukan. Pilih file EDSDK.dll di pengaturan, '
+              'atau letakkan folder EDSDK di samping aplikasi.';
+          _addLog('Deteksi: $msg');
+          return const CanonDetectResult(found: false, message: msg);
+        }
+        _addLog('Memuat $dll');
+        sdk.load(dll);
+      }
+
+      final int count = sdk.cameraCount();
+
+      if (count == 0) {
+        if (_state.isConnected) {
+          _handleCameraLost();
+        }
+        const String msg = 'Tidak ada kamera Canon terdeteksi. Cek kabel USB, '
+            'nyalakan kamera, dan tutup EOS Webcam Utility / EOS Utility.';
+        _addLog('Deteksi: 0 kamera di USB');
+        return const CanonDetectResult(found: false, message: msg);
+      }
+
+      final String detail = _state.isConnected
+          ? '${_deviceInfo.model} sudah tersambung.'
+          : 'Tekan "Cek Koneksi" untuk menyambungkan.';
+      final String msg = count == 1
+          ? '1 kamera Canon terdeteksi di USB. $detail'
+          : '$count kamera Canon terdeteksi di USB (yang pertama dipakai). '
+              '$detail';
+      _addLog('Deteksi: $count kamera di USB');
+      return CanonDetectResult(found: true, count: count, message: msg);
+    } catch (error) {
+      final String msg = _friendlyError(error);
+      _addLog('Deteksi gagal: $error');
+      return CanonDetectResult(found: false, message: msg);
     }
   }
 
