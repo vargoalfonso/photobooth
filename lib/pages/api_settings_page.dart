@@ -187,7 +187,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                       controller: _baseUrlCtrl,
                       decoration: const InputDecoration(
                         labelText: 'Base URL',
-                        hintText: 'http://43.163.90.58:8000/api',
+                        hintText: 'http://43.134.137.203:8000/api',
+                        helperText:
+                            'Endpoint API domain test.raigine.com saat ini mengembalikan 404.',
                         border: OutlineInputBorder(),
                       ),
                       keyboardType: TextInputType.url,

@@ -15,7 +15,13 @@ class PhotoBoothConfig extends ChangeNotifier {
   Future<void> loadPersisted() async {
     try {
       final SharedPreferences p = await SharedPreferences.getInstance();
-      apiBaseUrl = p.getString('${_kPrefix}apiBaseUrl') ?? apiBaseUrl;
+      final String? savedApiBaseUrl = p.getString('${_kPrefix}apiBaseUrl');
+      if (savedApiBaseUrl != null) {
+        final Uri? savedApiUri = Uri.tryParse(savedApiBaseUrl);
+        apiBaseUrl = savedApiUri?.host == '43.163.90.58'
+            ? _defaultApiBaseUrl
+            : savedApiBaseUrl;
+      }
       apiAuthToken = p.getString('${_kPrefix}apiAuthToken') ?? apiAuthToken;
       apiBoothId = p.getInt('${_kPrefix}apiBoothId') ?? apiBoothId;
       useCanonCamera = p.getBool('${_kPrefix}useCanon') ?? useCanonCamera;
@@ -75,7 +81,7 @@ class PhotoBoothConfig extends ChangeNotifier {
   /// Boleh diisi tanpa `/api` — client akan menambahkan otomatis.
   static const String _defaultApiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://43.163.90.58:8000/api',
+    defaultValue: 'http://43.134.137.203:8000/api',
   );
   static const String _defaultApiToken = String.fromEnvironment('API_TOKEN');
   static const int _defaultBoothId =
