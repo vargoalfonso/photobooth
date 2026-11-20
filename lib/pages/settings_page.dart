@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/booth_models.dart';
+import '../services/local_printer_service.dart';
 import '../state/photo_booth_config.dart';
 import '../utils/file_picker_helper.dart';
 
@@ -2341,20 +2342,67 @@ class _SettingsTabButton extends StatelessWidget {
   }
 }
 
-class _PrinterSettingsSection extends StatelessWidget {
+class _PrinterSettingsSection extends StatefulWidget {
   const _PrinterSettingsSection({required this.config});
 
   final PhotoBoothConfig config;
 
-  static const List<String> _printers = <String>[
-    'DS-RX1 (Default)',
+  @override
+  State<_PrinterSettingsSection> createState() =>
+      _PrinterSettingsSectionState();
+}
+
+class _PrinterSettingsSectionState extends State<_PrinterSettingsSection> {
+  static const List<String> _fallbackPrinters = <String>[
+    'DNP DS-RX1HS',
     'DNP DS620A',
     'Canon SELPHY CP1500',
     'Mitsubishi CP-D90DW',
   ];
 
+  List<String> _installed = <String>[];
+  bool _testing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshPrinters();
+  }
+
+  Future<void> _refreshPrinters() async {
+    final List<String> names = await LocalPrinterService.listPrinterNames();
+    if (!mounted) return;
+    setState(() => _installed = names);
+  }
+
+  /// Printer terpasang di Windows; bila kosong pakai daftar bawaan. Nilai
+  /// yang sedang dipilih selalu ikut supaya dropdown tidak error.
+  List<String> get _printers {
+    final List<String> base =
+        _installed.isNotEmpty ? _installed : _fallbackPrinters;
+    final List<String> out = <String>[...base];
+    final PhotoBoothConfig c = widget.config;
+    if (!out.contains(c.primaryPrinter)) out.insert(0, c.primaryPrinter);
+    return out;
+  }
+
+  Future<void> _testPrinter() async {
+    setState(() => _testing = true);
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    try {
+      await LocalPrinterService.printTestPage(widget.config.primaryPrinter);
+      messenger.showSnackBar(const SnackBar(
+          content: Text('Test print dikirim ke printer.')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Test print gagal: $e')));
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final PhotoBoothConfig config = widget.config;
     return Column(
       children: <Widget>[
         Container(
@@ -2418,17 +2466,34 @@ class _PrinterSettingsSection extends StatelessWidget {
                               },
                       ),
                       const SizedBox(height: 16),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Cetak langsung (tanpa dialog)'),
+                        subtitle: Text(LocalPrinterService.supported
+                            ? 'Tombol Cetak langsung mengirim ke printer Windows di atas.'
+                            : 'Hanya tersedia di Windows.'),
+                        value: config.directPrintEnabled,
+                        onChanged: config.disableAllPrinting ||
+                                !LocalPrinterService.supported
+                            ? null
+                            : config.setDirectPrintEnabled,
+                      ),
+                      const SizedBox(height: 8),
                       Row(
                         children: <Widget>[
                           FilledButton.tonal(
-                              onPressed:
-                                  config.disableAllPrinting ? null : () {},
-                              child: const Text('Configure Printer')),
+                              onPressed: _refreshPrinters,
+                              child: const Text('Refresh Printer')),
                           const SizedBox(width: 12),
                           FilledButton.tonal(
-                              onPressed:
-                                  config.disableAllPrinting ? null : () {},
-                              child: const Text('Test Printer')),
+                              onPressed: config.disableAllPrinting ||
+                                      _testing ||
+                                      !LocalPrinterService.supported
+                                  ? null
+                                  : _testPrinter,
+                              child: Text(_testing
+                                  ? 'Mengirim...'
+                                  : 'Test Printer')),
                         ],
                       ),
                       const SizedBox(height: 12),

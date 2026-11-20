@@ -14,6 +14,7 @@ import '../models/api_models.dart';
 import '../models/booth_models.dart';
 import '../models/payment_models.dart';
 import '../services/canon_camera_service.dart';
+import '../services/local_printer_service.dart';
 import '../services/monolith_api_client.dart';
 import '../services/photobooth_api_service.dart';
 import '../state/photo_booth_config.dart';
@@ -1253,16 +1254,44 @@ class _BoothPageState extends State<BoothPage> {
     setState(() => _printing = true);
 
     try {
-      if (!widget.config.apiEnabled) {
-        // Mode offline: tidak ada server untuk menyimpan / mencetak.
-        _showSnack(
-            '$printedMessage (API belum aktif, tidak disimpan ke dashboard)');
-        return;
-      }
-
-      // Potret mock selagi strip masih tampil di layar.
+      // Potret strip selagi masih tampil di layar.
       final Uint8List? mock = await _captureStripPng();
       if (!mounted) return;
+
+      // 0) Cetak langsung ke printer Windows (DNP DS-RX1HS), tanpa dialog
+      //    dan tanpa menunggu server.
+      bool printedLocally = false;
+      if (widget.config.directPrintEnabled && LocalPrinterService.supported) {
+        if (mock == null) {
+          _showSnack('Strip tidak tampil di layar, cetak langsung dilewati. '
+              'Tekan Cetak dari layar Filter/Cetak.');
+        } else {
+          _showSnack('Mengirim ke ${widget.config.primaryPrinter}...');
+          try {
+            await LocalPrinterService.printPng(
+              png: mock,
+              printerName: widget.config.primaryPrinter,
+              scalePercent: widget.config.printScalePercent,
+              offsetX: widget.config.printHorizontalOffset,
+              offsetY: widget.config.printVerticalOffset,
+              jobName: 'Photobooth ${_activeFrame.name}',
+            );
+            printedLocally = true;
+            _showSnack(printedMessage);
+          } catch (e) {
+            _showSnack('Gagal cetak langsung: $e');
+          }
+        }
+      }
+
+      if (!widget.config.apiEnabled) {
+        // Mode offline: tidak ada server untuk menyimpan.
+        if (!printedLocally) {
+          _showSnack(
+              '$printedMessage (API belum aktif, tidak disimpan ke dashboard)');
+        }
+        return;
+      }
 
       // 1) Simpan foto ke server bila sesi ini belum pernah diunggah.
       final int? sessionId =
@@ -1298,20 +1327,25 @@ class _BoothPageState extends State<BoothPage> {
           _showSnack('Foto tersimpan, tapi gagal mencatat cetak: $e');
         }
 
-        // 3) Kirim ke printer.
-        _showSnack('Mengirim ke ${widget.config.primaryPrinter}...');
-        try {
-          await svc.printSession(
-            sessionId: sessionId,
-            print: true,
-            markPrinted: false,
-          );
-          _showSnack(
-              '$printedMessage Tersimpan juga di dashboard (Hasil Print).');
-        } on ApiException catch (e) {
-          _showSnack('Gagal mencetak: ${e.message}');
-        } catch (e) {
-          _showSnack('Gagal mencetak: $e');
+        // 3) Kirim ke printer lewat server, hanya bila cetak langsung tidak
+        //    dipakai / gagal (supaya tidak tercetak dua kali).
+        if (printedLocally) {
+          _showSnack('Tercetak & tersimpan di dashboard (Hasil Print).');
+        } else {
+          _showSnack('Mengirim ke ${widget.config.primaryPrinter}...');
+          try {
+            await svc.printSession(
+              sessionId: sessionId,
+              print: true,
+              markPrinted: false,
+            );
+            _showSnack(
+                '$printedMessage Tersimpan juga di dashboard (Hasil Print).');
+          } on ApiException catch (e) {
+            _showSnack('Gagal mencetak: ${e.message}');
+          } catch (e) {
+            _showSnack('Gagal mencetak: $e');
+          }
         }
 
         // 4) Tanya email, lalu kirim semua foto + mock.

@@ -35,6 +35,10 @@ class PhotoBoothConfig extends ChangeNotifier {
           p.getString('${_kPrefix}camId') ?? preferredCameraId;
       preferredCameraName =
           p.getString('${_kPrefix}camName') ?? preferredCameraName;
+      primaryPrinter =
+          p.getString('${_kPrefix}primaryPrinter') ?? primaryPrinter;
+      directPrintEnabled =
+          p.getBool('${_kPrefix}directPrint') ?? directPrintEnabled;
       notifyListeners();
     } catch (_) {
       // pengaturan default tetap dipakai bila penyimpanan gagal dibaca
@@ -62,6 +66,8 @@ class PhotoBoothConfig extends ChangeNotifier {
         await p.setBool('${_kPrefix}canonAf', canonAutoFocusBeforeShot);
         await p.setInt('${_kPrefix}canonFps', canonLiveViewFps);
         await p.setInt('${_kPrefix}photos', photosPerSession);
+        await p.setString('${_kPrefix}primaryPrinter', primaryPrinter);
+        await p.setBool('${_kPrefix}directPrint', directPrintEnabled);
         final String? camId = preferredCameraId;
         final String? camName = preferredCameraName;
         if (camId != null) {
@@ -211,7 +217,12 @@ class PhotoBoothConfig extends ChangeNotifier {
   BoothApertureSetting apertureSetting = BoothApertureSetting.f11;
   bool enableExternalFlash = false;
   bool disableAllPrinting = false;
-  String primaryPrinter = 'DS-RX1 (Default)';
+  /// Nama printer Windows (persis seperti di Devices and Printers, atau
+  /// cukup mengandung "DS-RX1"). Dipakai untuk cetak langsung tanpa dialog.
+  String primaryPrinter = 'DNP DS-RX1HS';
+
+  /// Cetak langsung dari aplikasi ke printer Windows (tanpa lewat server).
+  bool directPrintEnabled = true;
   bool enableSecondaryPrinter = false;
   String? secondaryPrinter;
   BoothPrintMode printMode = BoothPrintMode.individualPrints;
@@ -467,6 +478,13 @@ class PhotoBoothConfig extends ChangeNotifier {
 
   void setPrimaryPrinter(String value) {
     primaryPrinter = value;
+    _persist();
+    notifyListeners();
+  }
+
+  void setDirectPrintEnabled(bool value) {
+    directPrintEnabled = value;
+    _persist();
     notifyListeners();
   }
 
